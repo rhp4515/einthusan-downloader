@@ -1,0 +1,22 @@
+services:
+  einthusan-downloader:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: einthusan-downloader
+    restart: unless-stopped
+    ports:
+      - "8502:8501"          # access at http://<your-server-ip>:8502
+    volumes:
+      - ./.env:/app/.env:ro  # credentials (read-only)
+      - /volume2/arr-data/media/manual_imports:/data/media/manual_imports
+    environment:
+      - STAGING_DIR_HOST=/data/media/manual_imports
+      - STAGING_DIR_RADARR=/data/media/manual_imports
+      # host.docker.internal resolves to the host machine, so Radarr at
+      # localhost:7878 is reachable from inside the container.
+      # Override in .env if Radarr is on a different machine.
+      - RADARR_URL=http://host.docker.internal:7878
+    # Needed on Linux for host.docker.internal to resolve correctly
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

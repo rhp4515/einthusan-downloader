@@ -56,6 +56,19 @@ class QueueLogHandler(logging.Handler):
         self.q.put({"type": "log", "level": level, "text": self.format(record)})
 
 
+class ListLogHandler(logging.Handler):
+    """Collects log records into a list for display after a sync operation."""
+
+    def __init__(self, records: list, debug: bool = False):
+        super().__init__()
+        self.records = records
+        self.setFormatter(logging.Formatter("%(message)s"))
+        self.setLevel(logging.DEBUG if debug else logging.INFO)
+
+    def emit(self, record):
+        self.records.append({"level": record.levelname, "text": self.format(record)})
+
+
 # ── Session state helpers ────────────────────────────────────────────────────
 
 def _init_state():
@@ -135,20 +148,9 @@ def _sidebar():
         has_auth = cfg["einthusan"]["cookies"] or cfg["einthusan"]["username"]
         with st.expander("Einthusan", expanded=not has_auth):
             st.caption(
-                "**Recommended:** paste your browser session cookie. "
-                "Open DevTools (F12) → Application → Cookies → einthusan.tv → copy the **sid** value."
+                "Enter your Einthusan username and password — a headless browser "
+                "will log in automatically. Or paste a session cookie if you prefer."
             )
-            overrides["EINTHUSAN_COOKIES"] = st.text_input(
-                "Session cookie  (sid=…)",
-                value=cfg["einthusan"]["cookies"],
-                placeholder="sid=MTc3...",
-                help="Paste the full cookie string from your browser. "
-                     "At minimum you need: sid=<value>. "
-                     "You can also include: sid=X; _gorilla_csrf=Y; tid=Z",
-                key="si_cookies",
-            )
-            st.divider()
-            st.caption("— or use username / password (may fail if login page changes) —")
             overrides["EINTHUSAN_USERNAME"] = st.text_input(
                 "Username / Email",
                 value=cfg["einthusan"]["username"],
@@ -159,6 +161,17 @@ def _sidebar():
                 value=cfg["einthusan"]["password"],
                 type="password",
                 key="si_pass",
+            )
+            st.divider()
+            st.caption("— or paste a session cookie to skip the browser login —")
+            overrides["EINTHUSAN_COOKIES"] = st.text_input(
+                "Session cookie  (sid=…)",
+                value=cfg["einthusan"]["cookies"],
+                placeholder="sid=MTc3...",
+                help="Paste the full cookie string from your browser. "
+                     "At minimum you need: sid=<value>. "
+                     "You can also include: sid=X; _gorilla_csrf=Y; tid=Z",
+                key="si_cookies",
             )
 
         with st.expander("Radarr", expanded=not cfg["radarr"]["api_key"]):
@@ -198,6 +211,14 @@ def _sidebar():
 
         # Persist non-empty overrides
         st.session_state["config"] = {k: v for k, v in overrides.items() if v}
+
+        # Debug mode
+        st.divider()
+        st.session_state["debug_mode"] = st.checkbox(
+            "Debug logging",
+            value=st.session_state.get("debug_mode", False),
+            help="Show detailed logs (field selectors, page HTML snippets, cookies) in the UI and terminal.",
+        )
 
         # Radarr connectivity badge
         st.divider()
@@ -256,9 +277,11 @@ def _background_import(
     # Attach a log handler so every log.info() inside einthusan_dl flows to the UI.
     # Also set the level explicitly — without this the effective level defaults to
     # WARNING (inherited from the root logger) and INFO messages are silently dropped.
+    debug = cfg.get("debug_mode", False)
     handler = QueueLogHandler(msg_queue)
+    handler.setLevel(logging.DEBUG if debug else logging.INFO)
     dl_logger = logging.getLogger("einthusan_dl")
-    dl_logger.setLevel(logging.INFO)
+    dl_logger.setLevel(logging.DEBUG if debug else logging.INFO)
     dl_logger.addHandler(handler)
 
     try:
@@ -388,42 +411,74 @@ def _run_preview(url: str, cfg: dict):
     Synchronously: login → fetch page → TMDB lookup.
     Stores results in session_state and advances to 'preview'.
     """
-    with st.status("Fetching movie information …", expanded=True) as status:
-        try:
-            st.write("🔐 Logging in to Einthusan.tv …")
-            client = EinthusanClient(
-                cfg["einthusan"]["username"],
-                cfg["einthusan"]["password"],
-                cfg["einthusan"]["cookies"],
-            )
-            client.login()
-            st.write("✓ Logged in")
+    debug = st.session_state.get("debug_mode", False)
+    phase1_logs: list = []
 
-            st.write(f"📄 Fetching page: `{url}` …")
-            movie_info = client.get_movie_info(url)
-            # Stash the authenticated session so Phase 2 can reuse it
-            movie_info["_session"] = client.session
-            st.write(f"✓ Detected: **{movie_info['title']}** ({movie_info['year']})")
+    dl_logger = logging.getLogger("einthusan_dl")
+    list_handler = ListLogHandler(phase1_logs, debug=debug)
+    # Also mirror to stderr so logs always appear in the terminal
+    stderr_handler = logging.StreamHandler(sys.stderr)
+    stderr_handler.setFormatter(logging.Formatter("%(levelname)-8s %(message)s"))
+    stderr_handler.setLevel(logging.DEBUG if debug else logging.INFO)
+    dl_logger.setLevel(logging.DEBUG if debug else logging.INFO)
+    dl_logger.addHandler(list_handler)
+    dl_logger.addHandler(stderr_handler)
 
-            st.write("🔍 Searching TMDB via Radarr …")
-            radarr = RadarrClient(cfg["radarr"]["url"], cfg["radarr"]["api_key"])
-            results = radarr.lookup_movie(movie_info["title"], movie_info["year"])
-            if not results:
-                st.error("No TMDB results found. Try a different URL.")
-                return
-            st.write(f"✓ Found {len(results)} result(s)")
+    failed = False
+    error_msg = ""
 
-            st.session_state.movie_info = movie_info
-            st.session_state.tmdb_results = results
-            st.session_state.step = "preview"
-            status.update(label="Ready — confirm the details below", state="complete")
+    try:
+        with st.status("Fetching movie information …", expanded=True) as status:
+            try:
+                st.write("🔐 Logging in to Einthusan.tv …")
+                client = EinthusanClient(
+                    cfg["einthusan"]["username"],
+                    cfg["einthusan"]["password"],
+                    cfg["einthusan"]["cookies"],
+                )
+                client.login()
+                st.write("✓ Logged in")
 
-        except SystemExit:
-            status.update(label="Failed", state="error")
-            st.error("Could not extract video URL or login failed. See logs.")
-        except Exception as exc:
-            status.update(label="Failed", state="error")
-            st.error(f"Error: {exc}")
+                st.write(f"📄 Fetching page: `{url}` …")
+                movie_info = client.get_movie_info(url)
+                # Stash the authenticated session so Phase 2 can reuse it
+                movie_info["_session"] = client.session
+                st.write(f"✓ Detected: **{movie_info['title']}** ({movie_info['year']})")
+
+                st.write("🔍 Searching TMDB via Radarr …")
+                radarr = RadarrClient(cfg["radarr"]["url"], cfg["radarr"]["api_key"])
+                results = radarr.lookup_movie(movie_info["title"], movie_info["year"])
+                if not results:
+                    status.update(label="Failed — no TMDB results", state="error")
+                    failed = True
+                    error_msg = "No TMDB results found. Try a different URL."
+                else:
+                    st.write(f"✓ Found {len(results)} result(s)")
+                    st.session_state.movie_info = movie_info
+                    st.session_state.tmdb_results = results
+                    st.session_state.step = "preview"
+                    status.update(label="Ready — confirm the details below", state="complete")
+
+            except SystemExit:
+                status.update(label="Failed", state="error")
+                failed = True
+                error_msg = "Login or extraction failed."
+            except Exception as exc:
+                status.update(label="Failed", state="error")
+                failed = True
+                error_msg = str(exc)
+    finally:
+        dl_logger.removeHandler(list_handler)
+        dl_logger.removeHandler(stderr_handler)
+
+    # Render error + logs OUTSIDE the st.status block so they are always visible.
+    # (Content written inside a collapsed/errored status widget is hidden by Streamlit.)
+    if failed:
+        st.error(error_msg)
+
+    if phase1_logs and (failed or debug):
+        st.caption(f"Login log · {len(phase1_logs)} lines")
+        _render_logs(phase1_logs)
 
 
 # ── UI: step pages ────────────────────────────────────────────────────────────
@@ -522,6 +577,7 @@ def _page_preview():
             st.session_state.error = ""
             st.session_state.step = "running"
 
+            cfg["debug_mode"] = st.session_state.get("debug_mode", False)
             t = threading.Thread(
                 target=_background_import,
                 args=(cfg, info, chosen, st.session_state.msg_queue),

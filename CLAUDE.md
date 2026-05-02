@@ -8,6 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 uv venv .venv
 uv pip install -r requirements.txt --python .venv/bin/python3
+.venv/bin/playwright install chromium
 ```
 
 **Run tests:**
@@ -26,7 +27,9 @@ uv pip install -r requirements.txt --python .venv/bin/python3
 
 **Run the CLI directly:**
 ```bash
-.venv/bin/python einthusan_dl.py <einthusan_url> [--debug] [--download-only] [--radarr-only /path/to/file.mp4]
+.venv/bin/python einthusan_dl.py <einthusan_url> [--debug] [--download-only] [--skip-download] [--radarr-only /path/to/file.mp4]
+# List Radarr quality profiles and root folders:
+.venv/bin/python einthusan_dl.py --list-profiles
 ```
 
 **Docker:**
@@ -44,9 +47,11 @@ Two entry points share the same core library (`einthusan_dl.py`):
 ### `einthusan_dl.py` — two classes
 
 **`EinthusanClient`** handles auth and scraping:
-- Auth: cookie injection (primary, `EINTHUSAN_COOKIES=sid=...`) or form login with dynamic CSRF detection (supports both Django `csrfmiddlewaretoken` and gorilla `_gorilla_csrf`)
+- Auth (tried in order): (1) cookie injection (`EINTHUSAN_COOKIES=sid=...`); (2) headless Chromium via Playwright (`_browser_login`) when username+password are set; (3) plain HTTP form POST fallback (`_form_login`) if Playwright is unavailable
+- `_browser_login` mechanism: Einthusan's login is **not** a form POST. `UILogin` registers a `'Login'` handler on the `arc65.page` event bus (CSRF handled internally via `arc65.page.id`). `UILogin` is never a global — it lives in a closure. We call `arc65.page.send('Login', { Email, Password })` directly. The server always returns HTTP 200; success/failure is detected from `data.Event === 'UserMessage' && data.Data.Err`.
 - `get_movie_info(url)` → scrapes `#UIVideoPlayer` element for `data-mp4-link`, `data-content-title`, `data-hls-link`; has 6 fallback extraction methods
-- `_resolve_to_cdn(raw_url)` → raw IPs in `data-mp4-link` (e.g. `117.106.99.123`) time out; this method probes `cdn1/cdn2/cdn3.einthusan.io` via HEAD requests and returns the working CDN hostname URL
+- `_cdn_hosts_from_page(soup)` → decodes the base64 `data-ejpingables` attribute on `#UIVideoPlayer` to get the live CDN hostname list; falls back to `cdn1/cdn2/cdn3.einthusan.io`
+- `_resolve_to_cdn(raw_url)` → raw IPs in `data-mp4-link` (e.g. `117.106.99.123`) time out; this method calls `_cdn_hosts_from_page` then probes each CDN via HEAD requests and returns the working hostname URL
 - `download(url, dest_path, on_progress)` → streams download with tqdm / callback progress
 
 **`RadarrClient`** wraps Radarr v3 API:
@@ -60,6 +65,8 @@ Two entry points share the same core library (`einthusan_dl.py`):
 **Phase 1 (sync, main thread):** URL input → `EinthusanClient.login()` + `get_movie_info()` → Radarr TMDB lookup → user picks match → advances to `preview` step.
 
 **Phase 2 (background thread):** `_background_import()` runs in a `daemon=True` thread. All output goes through `queue.Queue` stored in `st.session_state.msg_queue`. The main thread polls every 0.75 s via `st.rerun()`, draining the queue to update logs and progress bar. The `QueueLogHandler` bridges Python `logging` → queue, attached to the `einthusan_dl` logger (level must be set to `INFO` explicitly, not inherited from root).
+
+**Phase 1 → Phase 2 session handoff:** `_run_preview` stashes the live `requests.Session` as `movie_info["_session"]`. Phase 2 reuses it via `EinthusanClient.__new__(EinthusanClient); client.session = movie_info["_session"]` — bypassing `__init__` so the already-authenticated session is reused without re-logging in.
 
 **Import flow inside `_background_import`:**
 1. Resolve Radarr tag + Tamil language ID
@@ -86,6 +93,8 @@ The download button uses `on_click` callback to set `download_clicked=True` *bef
 | `STAGING_DIR_HOST` | Path writable by the einthusan container |
 | `STAGING_DIR_RADARR` | Same folder as seen by the Radarr container |
 | `RADARR_ROOT_FOLDER` | Movies root path inside Radarr's container |
+| `RADARR_QUALITY_PROFILE_ID` | Radarr quality profile ID (default: `1`) |
+| `RADARR_LANGUAGE_PROFILE_ID` | Radarr language profile ID (default: `1`) |
 | `DOWNLOAD_CHOWN` | e.g. `arr-user:users` — must match arr-stack PUID:PGID |
 
 `docker-compose.yaml` overrides `STAGING_DIR_HOST` and `STAGING_DIR_RADARR` to `/data/media/manual_imports` (the container-internal path for the mounted volume).

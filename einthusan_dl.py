@@ -29,6 +29,12 @@ from bs4 import BeautifulSoup
 from tqdm import tqdm
 from dotenv import load_dotenv
 
+try:
+    from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
+    _PLAYWRIGHT_AVAILABLE = True
+except ImportError:
+    _PLAYWRIGHT_AVAILABLE = False
+
 # ── Logging setup ─────────────────────────────────────────────────────────────
 
 def setup_logging(debug: bool = False):
@@ -102,10 +108,10 @@ class EinthusanClient:
 
     # Tried in order when doing form-based login
     _LOGIN_CANDIDATES = [
-        "https://einthusan.tv/account/signin/",
-        "https://einthusan.tv/account/login/",
-        "https://einthusan.tv/signin/",
-        "https://einthusan.tv/login/",
+        "https://einthusan.tv/login/?lang=tamil",
+        "https://einthusan.tv/account/signin/?lang=tamil",
+        "https://einthusan.tv/account/login/?lang=tamil",
+        "https://einthusan.tv/signin/?lang=tamil",
     ]
 
     HEADERS = {
@@ -131,14 +137,29 @@ class EinthusanClient:
         """
         Authenticate with Einthusan.tv.
 
-        Two methods, tried in order:
-          1. Cookie string  — set EINTHUSAN_COOKIES in .env (recommended, most reliable)
-          2. Form login     — username + password, finds the login page dynamically
+        Three methods, tried in order:
+          1. Cookie string   — set EINTHUSAN_COOKIES in .env (fastest)
+          2. Browser login   — headless Chromium via Playwright (recommended when
+                               using username + password; handles any JS auth flow)
+          3. Form login      — plain HTTP POST fallback if Playwright is unavailable
         """
         if self._raw_cookies:
             self._login_with_cookies()
+        elif self.username and self.password:
+            if _PLAYWRIGHT_AVAILABLE:
+                self._browser_login()
+            else:
+                log.warning(
+                    "Playwright is not installed — falling back to form login. "
+                    "Run: playwright install chromium"
+                )
+                self._form_login()
         else:
-            self._form_login()
+            log.error(
+                "Einthusan auth not configured. "
+                "Set EINTHUSAN_USERNAME + EINTHUSAN_PASSWORD, or EINTHUSAN_COOKIES."
+            )
+            sys.exit(1)
 
     def _login_with_cookies(self) -> None:
         """
@@ -158,6 +179,88 @@ class EinthusanClient:
                 k, _, v = part.partition("=")
                 self.session.cookies.set(k.strip(), v.strip(), domain="einthusan.tv")
         log.info("Session cookies set — skipping form login.")
+        self._logged_in = True
+
+    def _browser_login(self) -> None:
+        """
+        Login via Einthusan's arc65.page event bus.
+
+        The site's login is not a form POST.  UILogin registers a 'Login' handler
+        on the arc65.page event bus and handles CSRF internally via arc65.page.id.
+        UILogin itself is never a global — it lives inside a closure — so we call
+        arc65.page.send('Login', ...) directly.
+        """
+        login_url = "https://einthusan.tv/login/?lang=tamil"
+        log.info("Loading login page via headless browser …")
+
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
+            ctx = browser.new_context(user_agent=self.HEADERS["User-Agent"])
+            page = ctx.new_page()
+
+            try:
+                page.goto(login_url, timeout=30_000)
+            except PlaywrightTimeout:
+                browser.close()
+                raise RuntimeError("Timed out loading Einthusan login page.")
+
+            page.wait_for_load_state("load")
+            log.debug(f"Page loaded: {page.url!r}")
+
+            # Wait for the arc65.page event bus (always present; UILogin registers on it)
+            try:
+                page.wait_for_function(
+                    "typeof arc65 !== 'undefined' && typeof arc65.page !== 'undefined' "
+                    "&& typeof arc65.page.send === 'function'",
+                    timeout=10_000,
+                )
+            except PlaywrightTimeout:
+                browser.close()
+                raise RuntimeError(
+                    "arc65.page event bus not found after 10 s — site JS may have changed."
+                )
+
+            # Send credentials and wait for the /ajax/login/ response in one step.
+            log.info("Sending login credentials via browser …")
+            try:
+                with page.expect_response(
+                    lambda r: "einthusan.tv/ajax/login" in r.url,
+                    timeout=15_000,
+                ) as resp_info:
+                    page.evaluate(
+                        "([e, p]) => arc65.page.send('Login', { Email: e, Password: p })",
+                        [self.username, self.password],
+                    )
+            except PlaywrightTimeout:
+                browser.close()
+                raise RuntimeError("No response from /ajax/login/ within 15 s.")
+
+            resp = resp_info.value
+            try:
+                data = resp.json()
+            except Exception:
+                data = {}
+            log.debug(f"Login API: HTTP {resp.status} → {data!r}")
+
+            # The API always returns HTTP 200; success/failure is in the JSON body.
+            if data.get("Event") == "UserMessage" and data.get("Data", {}).get("Err"):
+                browser.close()
+                msg = data["Data"].get("Message", "unknown error")
+                raise RuntimeError(
+                    f"Einthusan login failed: {msg}. "
+                    "Check your EINTHUSAN_USERNAME / EINTHUSAN_PASSWORD."
+                )
+
+            cookies = ctx.cookies()
+            einthusan_cookies = [c["name"] for c in cookies if "einthusan" in (c.get("domain") or "")]
+            log.debug(f"Einthusan cookies acquired: {einthusan_cookies}")
+            browser.close()
+
+        for c in cookies:
+            self.session.cookies.set(c["name"], c["value"],
+                                     domain=c.get("domain", "einthusan.tv"))
+
+        log.info("Browser login successful.")
         self._logged_in = True
 
     def _form_login(self) -> None:

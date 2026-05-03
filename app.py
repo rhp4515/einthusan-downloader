@@ -130,8 +130,8 @@ def _load_config() -> dict:
         },
         "staging_host": _get("STAGING_DIR_HOST", "/data/media/manual_imports"),
         "staging_radarr": _get("STAGING_DIR_RADARR", "/data/media/manual_imports"),
-        # e.g. "1006:100" or "hariprar:users" — set to match your arr-stack PUID:PGID
-        "download_chown": _get("DOWNLOAD_CHOWN", ""),
+        # e.g. "arr-user:users" — set to match your arr-stack PUID:PGID
+        "download_chown": _get("DOWNLOAD_CHOWN"),
     }
 
 

@@ -12,8 +12,7 @@ services:
       - ./.env:/app/.env:ro  # credentials (read-only)
       - /volume2/arr-data/media/manual_imports:/data/media/manual_imports
     environment:
-      - STAGING_DIR_HOST=${STAGING_DIR_HOST}
-      - STAGING_DIR_RADARR=${STAGING_DIR_RADARR}
+      - STAGING_DIR_HOST=/data/media/manual_imports
       - DOWNLOAD_CHOWN=${DOWNLOAD_CHOWN}
       # host.docker.internal resolves to the host machine, so Radarr at
       # localhost:7878 is reachable from inside the container.

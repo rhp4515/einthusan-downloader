@@ -13,7 +13,6 @@ import logging
 import os
 import queue
 import re
-import shutil
 import sys
 import threading
 import time
@@ -129,9 +128,7 @@ def _load_config() -> dict:
             "language_profile_id": int(_get("RADARR_LANGUAGE_PROFILE_ID", "1")),
         },
         "staging_host": _get("STAGING_DIR_HOST", "/data/media/manual_imports"),
-        "staging_radarr": _get("STAGING_DIR_RADARR", "/data/media/manual_imports"),
-        # e.g. "arr-user:users" — set to match your arr-stack PUID:PGID
-        "download_chown": _get("DOWNLOAD_CHOWN"),
+
     }
 
 
@@ -199,14 +196,9 @@ def _sidebar():
 
         with st.expander("Paths"):
             overrides["STAGING_DIR_HOST"] = st.text_input(
-                "Staging dir (host path)",
+                "Staging dir",
                 value=cfg["staging_host"],
                 key="si_staging_host",
-            )
-            overrides["STAGING_DIR_RADARR"] = st.text_input(
-                "Staging dir (Radarr container path)",
-                value=cfg["staging_radarr"],
-                key="si_staging_radarr",
             )
 
         # Persist non-empty overrides
@@ -337,32 +329,17 @@ def _background_import(
         client.session = movie_info["_session"]  # reuse authenticated session
         client.download(video_url, dest_path, on_progress=on_progress)
 
-        # ── File permissions ─────────────────────────────────────────────────
-        try:
-            os.chmod(dest_path, 0o664)
-            chown = cfg.get("download_chown", "").strip()
-            if chown:
-                parts = chown.split(":", 1)
-                user  = parts[0].strip() or None
-                group = parts[1].strip() if len(parts) > 1 else None
-                shutil.chown(str(dest_path), user=user, group=group)
-                log("INFO", f"Permissions set: 664, owner {chown}")
-            else:
-                log("INFO", "Permissions set: 664")
-        except Exception as exc:
-            log("WARNING", f"Could not set file permissions: {exc}")
-
         # ── Manual import ────────────────────────────────────────────────────
-        radarr_file_path = str(Path(cfg["staging_radarr"]) / dest_path.name)
+        radarr_file_path = str(Path(cfg["staging_host"]) / dest_path.name)
         try:
             log("INFO", "Asking Radarr to analyse the staging folder …")
-            import_items = radarr.manual_import_analyze(cfg["staging_radarr"], movie_id)
+            import_items = radarr.manual_import_analyze(cfg["staging_host"], movie_id)
             matching = [i for i in import_items if Path(i["path"]).name == dest_path.name]
 
             if not matching:
                 log("WARNING",
                     f"Radarr could not see '{dest_path.name}' in the staging folder.\n"
-                    f"Radarr container path checked: {cfg['staging_radarr']}\n"
+                    f"Path checked: {cfg['staging_host']}\n"
                     "Import manually via Radarr UI → Movies → Manual Import.")
             else:
                 radarr.manual_import_approve(

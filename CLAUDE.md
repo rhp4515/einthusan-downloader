@@ -90,11 +90,10 @@ The download button uses `on_click` callback to set `download_clicked=True` *bef
 | Variable | Notes |
 |---|---|
 | `EINTHUSAN_COOKIES` | `sid=<value>` from browser DevTools — preferred over username/password |
-| `STAGING_DIR_HOST` | Path writable by the einthusan container |
-| `STAGING_DIR_RADARR` | Same folder as seen by the Radarr container |
+| `STAGING_DIR_HOST` | Staging folder path (same mount point used by both the downloader and Radarr containers) |
 | `RADARR_ROOT_FOLDER` | Movies root path inside Radarr's container |
 | `RADARR_QUALITY_PROFILE_ID` | Radarr quality profile ID (default: `1`) |
 | `RADARR_LANGUAGE_PROFILE_ID` | Radarr language profile ID (default: `1`) |
 | `DOWNLOAD_CHOWN` | e.g. `arr-user:users` — must match arr-stack PUID:PGID |
 
-`docker-compose.yaml` overrides `STAGING_DIR_HOST` and `STAGING_DIR_RADARR` to `/data/media/manual_imports` (the container-internal path for the mounted volume).
+`docker-compose.yaml` hardcodes `STAGING_DIR_HOST=/data/media/manual_imports` (the container-internal mount point); both the downloader and Radarr containers share the same mount path so no separate Radarr path is needed.

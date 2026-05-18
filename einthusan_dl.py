@@ -73,7 +73,7 @@ def load_config() -> dict:
 
     required = [
         "RADARR_URL", "RADARR_API_KEY",
-        "RADARR_ROOT_FOLDER", "STAGING_DIR_HOST", "STAGING_DIR_RADARR",
+        "RADARR_ROOT_FOLDER", "STAGING_DIR_HOST",
     ]
     missing = [k for k in required if not os.environ.get(k)]
     if missing:
@@ -95,7 +95,6 @@ def load_config() -> dict:
             "language_profile_id": int(os.environ.get("RADARR_LANGUAGE_PROFILE_ID", "1")),
         },
         "staging_host": os.environ["STAGING_DIR_HOST"],
-        "staging_radarr": os.environ["STAGING_DIR_RADARR"],
     }
 
 
@@ -1141,8 +1140,8 @@ def _radarr_import(
 
     # Trigger manual import analysis
     # The folder path must be as seen by the Radarr container
-    staging_radarr = cfg["staging_radarr"]
-    import_items = radarr.manual_import_analyze(staging_radarr, movie_id)
+    staging = cfg["staging_host"]
+    import_items = radarr.manual_import_analyze(staging, movie_id)
 
     # Filter to only the file we just downloaded
     matching = [
@@ -1153,9 +1152,8 @@ def _radarr_import(
     if not matching:
         log.warning(
             f"Radarr did not find '{file_path.name}' in its import analysis.\n"
-            f"Checked path (Radarr view): {staging_radarr}\n"
+            f"Checked path: {staging}\n"
             "Possible causes:\n"
-            "  • The staging path inside the Radarr container is different from STAGING_DIR_RADARR\n"
             "  • File permissions prevent Radarr from reading the file\n"
             "  • Try importing manually in the Radarr UI: Movies → Manual Import"
         )

@@ -542,6 +542,9 @@ def _page_preview():
         ]
         choice = st.selectbox("Select correct movie", options, index=0, key="tmdb_select")
         st.session_state.tmdb_choice = options.index(choice)
+        tmdb_id = results[st.session_state.tmdb_choice].get("tmdbId")
+        if tmdb_id:
+            st.link_button("Open on TMDB ↗", f"https://www.themoviedb.org/movie/{tmdb_id}")
 
     chosen = results[st.session_state.tmdb_choice]
     if chosen.get("overview"):

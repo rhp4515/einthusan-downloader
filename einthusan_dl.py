@@ -866,7 +866,17 @@ class RadarrClient:
         if movie_id:
             params["movieId"] = movie_id
         log.info(f"Analyzing folder for import (Radarr path): {folder}")
-        resp = self._get("/api/v3/manualimport", **params)
+        try:
+            resp = self._get("/api/v3/manualimport", **params)
+        except requests.HTTPError as exc:
+            if exc.response is not None and exc.response.status_code == 500 and movie_id:
+                # Some Radarr versions return 500 when movieId is combined with
+                # folder scan; retry without it and let the caller filter by filename.
+                log.debug("Radarr returned 500 with movieId — retrying without it …")
+                params.pop("movieId")
+                resp = self._get("/api/v3/manualimport", **params)
+            else:
+                raise
         items = resp.json()
         log.debug(f"Manual import analysis returned {len(items)} candidate(s)")
         return items

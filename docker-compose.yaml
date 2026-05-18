@@ -5,6 +5,7 @@ services:
       dockerfile: Dockerfile
     container_name: einthusan-downloader
     restart: unless-stopped
+    user: "1006:100"   # arr-user:users — files land with correct ownership, no chown needed
     ports:
       - "8502:8501"          # access at http://<your-server-ip>:8502
     volumes:

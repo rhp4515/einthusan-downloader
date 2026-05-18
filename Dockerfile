@@ -45,15 +45,19 @@ COPY --from=builder /pw-browsers /pw-browsers
 # Tell Playwright where to find the browsers at runtime
 ENV PLAYWRIGHT_BROWSERS_PATH=/pw-browsers
 
+# Streamlit config via env vars — works for any UID, no ~/.streamlit needed
+ENV STREAMLIT_SERVER_HEADLESS=true \
+    STREAMLIT_SERVER_PORT=8501 \
+    STREAMLIT_SERVER_ENABLE_CORS=false \
+    STREAMLIT_SERVER_ENABLE_XSRF_PROTECTION=false \
+    STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
+
 # Copy application code
 COPY einthusan_dl.py app.py ./
 
-# Streamlit config — disable the "hey, check out our cloud" popups
-RUN mkdir -p /root/.streamlit && \
-    printf '[general]\nemail = ""\n[browser]\ngatherUsageStats = false\n' \
-    > /root/.streamlit/credentials.toml && \
-    printf '[server]\nheadless = true\nport = 8501\nenableCORS = false\nenableXsrfProtection = false\n' \
-    > /root/.streamlit/config.toml
+# Make the venv and browser binaries world-readable so the container can
+# run as a non-root UID (e.g. arr-user 1006:100 set in docker-compose).
+RUN chmod -R a+rX /app /pw-browsers
 
 EXPOSE 8501
 

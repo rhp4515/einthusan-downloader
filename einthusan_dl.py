@@ -687,6 +687,14 @@ class EinthusanClient:
 
         resp = self.session.get(video_url, headers=headers, stream=True, timeout=60)
 
+        if existing_size and resp.status_code == 416:
+            # Stale partial file — CDN token may have rotated; start over
+            log.warning("Range not satisfiable (416) — removing partial file and restarting.")
+            resp.close()
+            dest_path.unlink(missing_ok=True)
+            existing_size = 0
+            resp = self.session.get(video_url, stream=True, timeout=60)
+
         # Server may not support range — start over
         if existing_size and resp.status_code == 200:
             log.debug("Server does not support resuming; starting over.")

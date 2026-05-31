@@ -337,9 +337,11 @@ def _background_import(
             matching = [i for i in import_items if Path(i["path"]).name == dest_path.name]
 
             if not matching:
+                all_paths = [i.get("path", "") for i in import_items]
                 log("WARNING",
                     f"Radarr could not see '{dest_path.name}' in the staging folder.\n"
                     f"Path checked: {cfg['staging_host']}\n"
+                    f"Files Radarr did see: {all_paths or 'none'}\n"
                     "Import manually via Radarr UI → Movies → Manual Import.")
             else:
                 radarr.manual_import_approve(
@@ -347,6 +349,7 @@ def _background_import(
                     language_id=tamil_lang_id,
                     language_name="Tamil",
                     release_group="einthusan",
+                    movie_id=movie_id,
                 )
                 log("INFO", "Import submitted to Radarr ✓")
                 cmd_id = radarr.rescan_movie(movie_id)

@@ -750,6 +750,9 @@ class RadarrClient:
 
     def _post(self, path: str, payload: dict) -> requests.Response:
         resp = self.session.post(f"{self.base}{path}", json=payload, timeout=30)
+        if not resp.ok:
+            body = resp.text[:500]
+            log.error(f"Radarr POST {path} → HTTP {resp.status_code}: {body}")
         resp.raise_for_status()
         return resp
 
@@ -877,7 +880,16 @@ class RadarrClient:
             else:
                 raise
         items = resp.json()
-        log.debug(f"Manual import analysis returned {len(items)} candidate(s)")
+        log.info(f"Manual import analysis returned {len(items)} candidate(s)")
+        for item in items:
+            movie_match = (item.get("movie") or {}).get("title", "no match")
+            quality_name = (item.get("quality") or {}).get("quality", {}).get("name", "?")
+            rejections = [r.get("reason", "") for r in (item.get("rejections") or [])]
+            log.info(
+                f"  → {Path(item.get('path','?')).name}  "
+                f"movie={movie_match}  quality={quality_name}"
+                + (f"  rejections={rejections}" if rejections else "")
+            )
         return items
 
     def manual_import_approve(
@@ -886,6 +898,7 @@ class RadarrClient:
         language_id: int = 1,
         language_name: str = "Tamil",
         release_group: str = "einthusan",
+        movie_id: int = 0,
     ) -> None:
         """
         POST /api/v3/manualimport — submit import decisions to Radarr.
@@ -896,29 +909,47 @@ class RadarrClient:
           • `movieId` is a direct int field, not nested
           • removed `shouldReplace` — not in the spec and rejected by
             `additionalProperties: false`
+
+        movie_id: fallback Radarr movie ID used when Radarr's analyze step
+          returns items with movie=null (auto-match failed).
         """
         if not items:
             log.warning("No items to import.")
             return
-        payload = [
-            {
+        payload = []
+        for item in items:
+            matched_movie_id = (item.get("movie") or {}).get("id") or movie_id
+            if not matched_movie_id:
+                log.warning(
+                    f"Skipping '{Path(item['path']).name}': "
+                    "Radarr could not match it to a movie and no fallback movie_id was provided."
+                )
+                continue
+            if not item.get("movie"):
+                log.info(
+                    f"Radarr analyze returned movie=null for '{Path(item['path']).name}'; "
+                    f"using fallback movie_id={matched_movie_id}"
+                )
+            payload.append({
                 "id":           item["id"],
                 "path":         item["path"],
-                "movieId":      item["movie"]["id"],
+                "movieId":      matched_movie_id,
                 "quality":      item["quality"],
                 "languages":    [{"id": language_id, "name": language_name}],
                 "releaseGroup": release_group,
                 "downloadId":   "",
-            }
-            for item in items
-            if item.get("movie")
-        ]
+            })
         if not payload:
             log.error(
                 "Radarr could not match any file to a movie automatically.\n"
                 "You may need to import manually via the Radarr UI."
             )
             return
+        for entry in payload:
+            log.info(
+                f"  Importing: {Path(entry['path']).name}  "
+                f"movieId={entry['movieId']}  quality={entry['quality'].get('quality',{}).get('name','?')}"
+            )
         log.info(f"Submitting import for {len(payload)} file(s) …")
         self._post("/api/v3/manualimport", payload)
         log.info("Import submitted successfully.")
@@ -956,11 +987,16 @@ class RadarrClient:
         deadline = _time.time() + timeout
         while _time.time() < deadline:
             try:
-                status = self._get(f"/api/v3/command/{command_id}").json().get("status", "")
+                data = self._get(f"/api/v3/command/{command_id}").json()
+                status = data.get("status", "")
                 if status == "completed":
+                    log.info(f"Radarr command {command_id} ({data.get('name','')}) completed ✓")
                     return True
                 if status in ("failed", "aborted"):
-                    log.warning(f"Radarr command {command_id} ended with status: {status}")
+                    log.warning(
+                        f"Radarr command {command_id} ({data.get('name','')}) "
+                        f"ended with status={status}: {data.get('message','')}"
+                    )
                     return False
             except Exception:
                 pass
@@ -1165,6 +1201,7 @@ def _radarr_import(
         language_id=tamil_language_id,
         language_name="Tamil",
         release_group="einthusan",
+        movie_id=movie_id,
     )
 
     # Final rescan to confirm

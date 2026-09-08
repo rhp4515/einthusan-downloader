@@ -145,3 +145,57 @@ def resolve_movie(cfg: dict, einthusan_url: str, *, on_log: OnLog | None = None)
         session=client.session,
         candidates=candidates,
     )
+
+
+# ── Add / remove in Radarr ───────────────────────────────────────────────
+
+def add_to_radarr(
+    cfg: dict,
+    candidate: TmdbCandidate,
+    *,
+    monitored: bool = False,
+    on_log: OnLog | None = None,
+) -> int:
+    """Add (or reuse + tag) the given TMDB candidate in Radarr.
+    Returns the Radarr movie ID. Defaults to unmonitored so no automatic
+    search fires before the user has verified the match."""
+    radarr = RadarrClient(cfg["radarr"]["url"], cfg["radarr"]["api_key"])
+    try:
+        tag_id = radarr.get_or_create_tag("einthusan")
+        existing = radarr.get_existing_movie(candidate.tmdb_id)
+        if existing:
+            _log(on_log, "INFO", f"Movie already in Radarr (id={existing['id']}): {candidate.title}")
+            radarr.update_movie_tags(existing, [tag_id])
+            return existing["id"]
+
+        _log(on_log, "INFO", f"Adding '{candidate.title} ({candidate.year})' to Radarr …")
+        movie = radarr.add_movie(
+            {"title": candidate.title, "year": candidate.year, "tmdbId": candidate.tmdb_id},
+            cfg["radarr"]["root_folder"],
+            cfg["radarr"]["quality_profile_id"],
+            cfg["radarr"]["language_profile_id"],
+            tags=[tag_id],
+            monitored=monitored,
+        )
+        return movie["id"]
+    except Exception as exc:
+        _log(on_log, "ERROR", f"Failed to add movie to Radarr: {exc}")
+        raise RadarrUnavailableError(str(exc)) from exc
+
+
+def remove_from_radarr(
+    cfg: dict,
+    radarr_movie_id: int,
+    *,
+    delete_files: bool = False,
+    on_log: OnLog | None = None,
+) -> None:
+    """Undo add_to_radarr — used when a job is cancelled/deleted before
+    downloading (e.g. the user rejected all candidates)."""
+    radarr = RadarrClient(cfg["radarr"]["url"], cfg["radarr"]["api_key"])
+    try:
+        radarr.delete_movie(radarr_movie_id, delete_files=delete_files)
+        _log(on_log, "INFO", f"Removed movie id={radarr_movie_id} from Radarr")
+    except Exception as exc:
+        _log(on_log, "ERROR", f"Failed to remove movie from Radarr: {exc}")
+        raise RadarrUnavailableError(str(exc)) from exc

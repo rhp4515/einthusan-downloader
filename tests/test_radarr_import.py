@@ -318,3 +318,102 @@ class TestManualImportApprove:
         payload = mock_post.call_args[0][1]
         assert payload[0]["movieId"] == 42
         assert isinstance(payload[0]["movieId"], int)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# add_movie — monitored parameter
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestAddMovieMonitored:
+    def _make_client_with_post(self, returned_movie: dict) -> tuple[RadarrClient, MagicMock]:
+        client = make_client()
+        post_resp = MagicMock()
+        post_resp.json.return_value = returned_movie
+        client._post = MagicMock(return_value=post_resp)
+        return client, client._post
+
+    def test_add_movie_defaults_to_monitored_true(self):
+        returned_movie = {"id": 42, "path": "/data/media/movies/Sabdham (2025)"}
+        client, mock_post = self._make_client_with_post(returned_movie)
+
+        client.add_movie(
+            tmdb_result={"title": "Sabdham", "year": 2025, "tmdbId": 12345},
+            root_folder="/data/media/movies",
+            quality_profile_id=1,
+            language_profile_id=1,
+        )
+
+        payload = mock_post.call_args[0][1]
+        assert payload["monitored"] is True
+
+    def test_add_movie_unmonitored_when_requested(self):
+        returned_movie = {"id": 42, "path": "/data/media/movies/Sabdham (2025)"}
+        client, mock_post = self._make_client_with_post(returned_movie)
+
+        client.add_movie(
+            tmdb_result={"title": "Sabdham", "year": 2025, "tmdbId": 12345},
+            root_folder="/data/media/movies",
+            quality_profile_id=1,
+            language_profile_id=1,
+            monitored=False,
+        )
+
+        payload = mock_post.call_args[0][1]
+        assert payload["monitored"] is False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# update_movie — full movie record update
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestUpdateMovie:
+    def test_puts_full_movie_record_and_returns_response(self):
+        client = make_client()
+        put_resp = MagicMock()
+        put_resp.raise_for_status = MagicMock()
+        put_resp.json.return_value = {"id": 42, "monitored": True}
+        client.session = MagicMock()
+        client.session.put = MagicMock(return_value=put_resp)
+
+        movie = {"id": 42, "monitored": True, "title": "Sabdham"}
+        result = client.update_movie(movie)
+
+        client.session.put.assert_called_once_with(
+            "http://localhost:7878/api/v3/movie/42",
+            json=movie,
+            timeout=30,
+        )
+        assert result == {"id": 42, "monitored": True}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# delete_movie — remove from library
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestDeleteMovie:
+    def test_deletes_without_files_by_default(self):
+        client = make_client()
+        del_resp = MagicMock()
+        del_resp.raise_for_status = MagicMock()
+        client.session = MagicMock()
+        client.session.delete = MagicMock(return_value=del_resp)
+
+        client.delete_movie(42)
+
+        client.session.delete.assert_called_once_with(
+            "http://localhost:7878/api/v3/movie/42",
+            params={"deleteFiles": "false"},
+            timeout=30,
+        )
+
+    def test_deletes_with_files_when_requested(self):
+        client = make_client()
+        del_resp = MagicMock()
+        del_resp.raise_for_status = MagicMock()
+        client.session = MagicMock()
+        client.session.delete = MagicMock(return_value=del_resp)
+
+        client.delete_movie(42, delete_files=True)
+
+        sent_params = client.session.delete.call_args[1]["params"]
+        assert sent_params == {"deleteFiles": "true"}

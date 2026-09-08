@@ -116,6 +116,34 @@ class TestRunDownload:
         after = store.get(job_id)
         assert after.state == "importing"
 
+    def test_progress_callback_first_sample_reports_no_speed_or_eta_then_second_sample_computes_real_values(self, monkeypatch):
+        store = JobStore()
+        job_id = self._job_ready_for_download(store)
+        cb = worker._make_progress_callback(store, job_id)
+
+        # Increment on every call to time.time() (both worker.py's own calls
+        # and the ones JobStore.update makes internally for updated_at,
+        # since "time" is a shared module singleton) so the second sample
+        # is guaranteed to look >= _PROGRESS_SAMPLE_SECONDS later than the
+        # first, without relying on wall-clock sleeps.
+        clock = {"now": 1000.0}
+
+        def fake_time():
+            clock["now"] += 0.3
+            return clock["now"]
+
+        monkeypatch.setattr(worker.time, "time", fake_time)
+
+        cb(10, 100)
+        first = store.get(job_id)
+        assert first.progress.speed_bps == 0.0
+        assert first.progress.eta_seconds is None
+
+        cb(60, 100)
+        second = store.get(job_id)
+        assert second.progress.speed_bps > 0
+        assert second.progress.eta_seconds is not None
+
     def test_progress_callback_raises_when_job_cancelled(self):
         store = JobStore()
         job_id = self._job_ready_for_download(store)

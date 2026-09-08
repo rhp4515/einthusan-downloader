@@ -45,9 +45,11 @@ def submit_download(store: JobStore, core_config: dict, job: Job) -> None:
 
 
 def _make_progress_callback(store: JobStore, job_id: str):
-    # last_ts starts at 0.0 (not time.time()) so the very first progress
-    # sample is never throttled away — it always reports immediately.
-    state = {"last_ts": 0.0, "last_bytes": 0}
+    # last_ts starts as None (not a real timestamp) so we can distinguish
+    # "no previous sample yet" from a real elapsed-time measurement — the
+    # very first sample is never throttled away, and never computes a
+    # speed/ETA from a bogus elapsed value.
+    state = {"last_ts": None, "last_bytes": 0}
 
     def on_progress(downloaded: int, total: int) -> None:
         job = store.get(job_id)
@@ -56,15 +58,22 @@ def _make_progress_callback(store: JobStore, job_id: str):
         if job.cancelled:
             raise importer.DownloadCancelled("Job was cancelled")
 
+        is_first_sample = state["last_ts"] is None
         now = time.time()
-        elapsed = now - state["last_ts"]
-        if elapsed < _PROGRESS_SAMPLE_SECONDS and downloaded < total:
-            return
 
-        delta_bytes = downloaded - state["last_bytes"]
-        speed_bps = delta_bytes / elapsed if elapsed > 0 else 0.0
-        remaining = max(total - downloaded, 0)
-        eta_seconds = remaining / speed_bps if speed_bps > 0 else None
+        if not is_first_sample:
+            elapsed = now - state["last_ts"]
+            if elapsed < _PROGRESS_SAMPLE_SECONDS and downloaded < total:
+                return
+
+        if is_first_sample:
+            speed_bps = 0.0
+            eta_seconds = None
+        else:
+            delta_bytes = downloaded - state["last_bytes"]
+            speed_bps = delta_bytes / elapsed if elapsed > 0 else 0.0
+            remaining = max(total - downloaded, 0)
+            eta_seconds = remaining / speed_bps if speed_bps > 0 else None
         percent = (downloaded / total * 100) if total else 0.0
 
         new_state = "importing" if total and downloaded >= total else "downloading"

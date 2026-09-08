@@ -159,3 +159,94 @@ class TestResolveMovie:
             resolve_movie(CFG, "https://einthusan.tv/movie/watch/abc123/", on_log=lambda lvl, txt: logs.append((lvl, txt)))
 
         assert any(lvl == "ERROR" for lvl, _ in logs)
+
+
+SABDHAM_CANDIDATE = TmdbCandidate(
+    tmdb_id=111,
+    title="Sabdham",
+    year=2025,
+    tmdb_url="https://www.themoviedb.org/movie/111",
+    poster_url=None,
+)
+
+
+class TestAddToRadarr:
+    def test_adds_new_movie_unmonitored_by_default(self, monkeypatch):
+        from importer import add_to_radarr
+        fake_radarr = MagicMock()
+        fake_radarr.get_or_create_tag.return_value = 5
+        fake_radarr.get_existing_movie.return_value = None
+        fake_radarr.add_movie.return_value = {"id": 42}
+        monkeypatch.setattr(importer, "RadarrClient", MagicMock(return_value=fake_radarr))
+
+        movie_id = add_to_radarr(CFG, SABDHAM_CANDIDATE)
+
+        assert movie_id == 42
+        fake_radarr.add_movie.assert_called_once()
+        _, kwargs = fake_radarr.add_movie.call_args
+        assert kwargs["monitored"] is False
+        assert kwargs["tags"] == [5]
+
+    def test_can_add_monitored_when_requested(self, monkeypatch):
+        from importer import add_to_radarr
+        fake_radarr = MagicMock()
+        fake_radarr.get_or_create_tag.return_value = 5
+        fake_radarr.get_existing_movie.return_value = None
+        fake_radarr.add_movie.return_value = {"id": 42}
+        monkeypatch.setattr(importer, "RadarrClient", MagicMock(return_value=fake_radarr))
+
+        add_to_radarr(CFG, SABDHAM_CANDIDATE, monitored=True)
+
+        _, kwargs = fake_radarr.add_movie.call_args
+        assert kwargs["monitored"] is True
+
+    def test_reuses_existing_movie_and_tags_it(self, monkeypatch):
+        from importer import add_to_radarr
+        fake_radarr = MagicMock()
+        fake_radarr.get_or_create_tag.return_value = 5
+        fake_radarr.get_existing_movie.return_value = {"id": 99, "tags": []}
+        monkeypatch.setattr(importer, "RadarrClient", MagicMock(return_value=fake_radarr))
+
+        movie_id = add_to_radarr(CFG, SABDHAM_CANDIDATE)
+
+        assert movie_id == 99
+        fake_radarr.add_movie.assert_not_called()
+        fake_radarr.update_movie_tags.assert_called_once_with({"id": 99, "tags": []}, [5])
+
+    def test_raises_radarr_unavailable_on_failure(self, monkeypatch):
+        from importer import add_to_radarr
+        fake_radarr = MagicMock()
+        fake_radarr.get_or_create_tag.side_effect = RuntimeError("connection refused")
+        monkeypatch.setattr(importer, "RadarrClient", MagicMock(return_value=fake_radarr))
+
+        with pytest.raises(importer.RadarrUnavailableError):
+            add_to_radarr(CFG, SABDHAM_CANDIDATE)
+
+
+class TestRemoveFromRadarr:
+    def test_deletes_movie_without_files_by_default(self, monkeypatch):
+        from importer import remove_from_radarr
+        fake_radarr = MagicMock()
+        monkeypatch.setattr(importer, "RadarrClient", MagicMock(return_value=fake_radarr))
+
+        remove_from_radarr(CFG, 42)
+
+        fake_radarr.delete_movie.assert_called_once_with(42, delete_files=False)
+
+    def test_deletes_movie_with_files_when_requested(self, monkeypatch):
+        from importer import remove_from_radarr
+        fake_radarr = MagicMock()
+        monkeypatch.setattr(importer, "RadarrClient", MagicMock(return_value=fake_radarr))
+
+        remove_from_radarr(CFG, 42, delete_files=True)
+
+        fake_radarr.delete_movie.assert_called_once_with(42, delete_files=True)
+
+    def test_raises_radarr_unavailable_on_failure(self, monkeypatch):
+        from importer import remove_from_radarr
+        fake_radarr = MagicMock()
+        fake_radarr.delete_movie.side_effect = RuntimeError("connection refused")
+        monkeypatch.setattr(importer, "RadarrClient", MagicMock(return_value=fake_radarr))
+
+        with pytest.raises(importer.RadarrUnavailableError):
+            remove_from_radarr(CFG, 42)

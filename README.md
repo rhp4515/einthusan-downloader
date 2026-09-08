@@ -30,7 +30,7 @@ docker compose up -d --build
 # 4. Open the UI
 http://<your-server-ip>:8502
 
-The Flutter/HTTP API is available separately at http://<your-server-ip>:8503 (requires the `X-Api-Key` header — see Configuration).
+The HTTP API is available separately at http://<your-server-ip>:8503 (requires the `X-Api-Key` header — see Configuration).
 ```
 
 ---

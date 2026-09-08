@@ -20,9 +20,12 @@ uv pip install -r requirements.txt --python .venv/bin/python3
 .venv/bin/pytest tests/test_radarr_import.py::TestManualImportApprove::test_language_is_tamil -v
 ```
 
-**Run the Streamlit UI locally:**
+**Run the API + Streamlit UI locally (two processes):**
 ```bash
-.venv/bin/streamlit run app.py
+.venv/bin/honcho start   # runs both `api` and `ui` from Procfile
+# or individually:
+.venv/bin/python -m api               # API on :8000
+.venv/bin/streamlit run app.py        # UI on :8501, set EINTHUSAN_API_BASE to point at it
 ```
 
 **Run the CLI directly:**
@@ -35,16 +38,19 @@ uv pip install -r requirements.txt --python .venv/bin/python3
 **Docker:**
 ```bash
 docker compose up --build -d
-# Accessible at http://<host>:8502
+# UI at http://<host>:8502, API at http://<host>:8503
 ```
 
 ## Architecture
 
-Two entry points share the same core library (`einthusan_dl.py`):
-- **`app.py`** — Streamlit web UI (primary user-facing interface)
-- **`einthusan_dl.py`** — also has a `main()` / argparse CLI for headless use
+### Three layers share `einthusan_dl.py`
 
-### `einthusan_dl.py` — two classes
+- **`einthusan_dl.py`** — `EinthusanClient` (auth + scraping) and `RadarrClient` (Radarr v3 API wrapper), plus a `main()`/argparse CLI for headless use. Unchanged low-level behavior; see below for exact mechanisms.
+- **`importer.py`** — framework-free orchestration: `resolve_movie` (login + scrape + TMDB lookup via Radarr), `add_to_radarr` (add-or-reuse + tag, unmonitored by default), `run_download_and_import` (flip monitored, download with one retry via a freshly re-resolved session, manual import with `DownloadedMoviesScan` fallback). Every failure raises an `ImporterError` subclass carrying a stable `.code` string consumed by the API.
+- **`api/`** — FastAPI + uvicorn service (`python -m api`, port 8000 by default) that is the *only* thing holding Einthusan/Radarr credentials at runtime. Exposes a job-based workflow (`POST /api/v1/movies` → `awaiting_verification` → `PATCH` to correct the TMDB match → `POST /api/v1/jobs/{id}/download` → poll `GET /api/v1/jobs/{id}`) backed by an in-memory `JobStore` and two `ThreadPoolExecutor`s (`resolve_pool`, 2 workers; `download_pool`, 1 worker — serial downloads). Auth is a static `X-Api-Key` header (`EINTHUSAN_API_KEY`). See `docs/superpowers/specs/2026-09-07-einthusan-http-api-design.md` for the full endpoint/error-code reference.
+- **`app.py`** — Streamlit UI, now a thin client of the API via `api_client.py::EinthusanApiClient`. Holds no Einthusan/Radarr credentials — only `EINTHUSAN_API_BASE` + `EINTHUSAN_API_KEY`. State machine: `input → resolving → preview → running → done | error`, driven by polling `GET /api/v1/jobs/{id}` every ~1.5s instead of the old daemon-thread + `queue.Queue` bridge.
+
+### `einthusan_dl.py` — `EinthusanClient` and `RadarrClient` details
 
 **`EinthusanClient`** handles auth and scraping:
 - Auth (tried in order): (1) cookie injection (`EINTHUSAN_COOKIES=sid=...`); (2) headless Chromium via Playwright (`_browser_login`) when username+password are set; (3) plain HTTP form POST fallback (`_form_login`) if Playwright is unavailable
@@ -60,26 +66,6 @@ Two entry points share the same core library (`einthusan_dl.py`):
 - `rescan_movie(movie_id)` → returns command ID (int)
 - `wait_for_command(command_id, timeout)` → polls `GET /api/v3/command/{id}` until `completed`/`failed`
 
-### `app.py` — two-phase Streamlit workflow
-
-**Phase 1 (sync, main thread):** URL input → `EinthusanClient.login()` + `get_movie_info()` → Radarr TMDB lookup → user picks match → advances to `preview` step.
-
-**Phase 2 (background thread):** `_background_import()` runs in a `daemon=True` thread. All output goes through `queue.Queue` stored in `st.session_state.msg_queue`. The main thread polls every 0.75 s via `st.rerun()`, draining the queue to update logs and progress bar. The `QueueLogHandler` bridges Python `logging` → queue, attached to the `einthusan_dl` logger (level must be set to `INFO` explicitly, not inherited from root).
-
-**Phase 1 → Phase 2 session handoff:** `_run_preview` stashes the live `requests.Session` as `movie_info["_session"]`. Phase 2 reuses it via `EinthusanClient.__new__(EinthusanClient); client.session = movie_info["_session"]` — bypassing `__init__` so the already-authenticated session is reused without re-logging in.
-
-**Import flow inside `_background_import`:**
-1. Resolve Radarr tag + Tamil language ID
-2. Add/find movie in Radarr → `rescan_movie` + `wait_for_command` to ensure folder exists before import (folder creation is async in Radarr)
-3. Download file to `STAGING_DIR_HOST`
-4. Set 664 permissions + `shutil.chown` from `DOWNLOAD_CHOWN`
-5. `manual_import_analyze` → `manual_import_approve` — if this raises (e.g. 500), fallback to `downloaded_movies_scan` command
-6. `rescan_movie` + `wait_for_command` to finalise
-
-**UI state machine** (`st.session_state.step`): `input` → `preview` → `running` → `done` | `error`.
-
-The download button uses `on_click` callback to set `download_clicked=True` *before* re-render (not inside the `if st.button()` block), ensuring the button is disabled immediately on click.
-
 ### Tests
 
 - `tests/test_extraction.py` — uses `examples/einthusan_source.html` as fixture; instantiates `EinthusanClient` without `__init__` via `__new__` to avoid network calls
@@ -90,10 +76,12 @@ The download button uses `on_click` callback to set `download_clicked=True` *bef
 | Variable | Notes |
 |---|---|
 | `EINTHUSAN_COOKIES` | `sid=<value>` from browser DevTools — preferred over username/password |
-| `STAGING_DIR_HOST` | Staging folder path (same mount point used by both the downloader and Radarr containers) |
+| `EINTHUSAN_API_KEY` | Static API key for authentication (the `X-Api-Key` header) |
+| `API_PORT` | Port for the HTTP API service (default: `8000`) |
+| `EINTHUSAN_API_BASE` | URL of the API service (used by `app.py`; defaults to `http://localhost:8000` locally, `http://einthusan-api:8000` in Docker) |
+| `STAGING_DIR_HOST` | Staging folder path (same mount point used by both containers) |
 | `RADARR_ROOT_FOLDER` | Movies root path inside Radarr's container |
 | `RADARR_QUALITY_PROFILE_ID` | Radarr quality profile ID (default: `1`) |
 | `RADARR_LANGUAGE_PROFILE_ID` | Radarr language profile ID (default: `1`) |
-| `DOWNLOAD_CHOWN` | e.g. `arr-user:users` — must match arr-stack PUID:PGID |
 
-`docker-compose.yaml` hardcodes `STAGING_DIR_HOST=/data/media/manual_imports` (the container-internal mount point); both the downloader and Radarr containers share the same mount path so no separate Radarr path is needed.
+The API service (`api/` package) is the only component that reads Einthusan/Radarr credentials at runtime. The Streamlit UI holds only `EINTHUSAN_API_BASE` and `EINTHUSAN_API_KEY`, making it stateless and credential-safe.

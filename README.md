@@ -7,10 +7,10 @@ Download Tamil movies from [Einthusan.tv](https://einthusan.tv) (premium account
 ## How it works
 
 1. Paste an Einthusan movie URL into the web UI
-2. The app logs in, extracts the signed MP4 URL, and searches TMDB via Radarr
+2. The API logs in, extracts the signed MP4 URL, and searches TMDB via Radarr
 3. You confirm the correct TMDB match
 4. The file downloads to your staging folder with a live progress bar
-5. Radarr imports it — tagged `einthusan`, language `Tamil`, release group `einthusan`
+5. The API imports it into Radarr — tagged `einthusan`, language `Tamil`, release group `einthusan`
 
 ---
 
@@ -29,6 +29,8 @@ docker compose up -d --build
 
 # 4. Open the UI
 http://<your-server-ip>:8502
+
+The Flutter/HTTP API is available separately at http://<your-server-ip>:8503 (requires the `X-Api-Key` header — see Configuration).
 ```
 
 ---
@@ -41,6 +43,8 @@ All settings live in `.env`. The sidebar in the UI can override them per-session
 # Einthusan
 EINTHUSAN_USERNAME=your@email.com
 EINTHUSAN_PASSWORD=yourpassword
+# Preferred over username/password — sid=<value> from browser DevTools
+EINTHUSAN_COOKIES=
 
 # Radarr
 # Use host.docker.internal when running in Docker (points to the host machine).
@@ -48,14 +52,24 @@ EINTHUSAN_PASSWORD=yourpassword
 RADARR_URL=http://host.docker.internal:7878
 RADARR_API_KEY=your_radarr_api_key
 RADARR_ROOT_FOLDER=/data/media/movies      # path inside the Radarr container
-RADARR_QUALITY_PROFILE_ID=1               # check Settings > Profiles in Radarr
+RADARR_QUALITY_PROFILE_ID=1
+RADARR_LANGUAGE_PROFILE_ID=1
 
 # Paths
-# The staging folder must be the same physical directory on disk,
-# mounted into both this container and the Radarr container.
-STAGING_DIR_HOST=/data/media/manual_imports    # as seen by this container
-STAGING_DIR_RADARR=/data/media/manual_imports  # as seen by the Radarr container
+STAGING_DIR_HOST=/data/media/manual_imports    # as seen by the API container
+
+# API service (api/)
+EINTHUSAN_API_KEY=choose-a-long-random-value
+API_PORT=8000
+
+# UI service (app.py) — only needed when running app.py against a remote API
+EINTHUSAN_API_BASE=http://localhost:8000
 ```
+
+The Streamlit UI (`einthusan-ui` service) no longer needs Einthusan or Radarr
+credentials directly — it only needs `EINTHUSAN_API_BASE` (defaults to
+`http://einthusan-api:8000` inside Docker Compose) and `EINTHUSAN_API_KEY`.
+All actual credentials live only in the `einthusan-api` service's `.env`.
 
 ### Finding your Radarr quality profile ID
 
@@ -68,7 +82,8 @@ STAGING_DIR_RADARR=/data/media/manual_imports  # as seen by the Radarr container
 ## Docker details
 
 ```
-host port 8502  →  container port 8501 (Streamlit)
+host port 8502  →  einthusan-ui container port 8501 (Streamlit)
+host port 8503  →  einthusan-api container port 8000 (HTTP API)
 ```
 
 The container needs to reach Radarr. Because it doesn't share a Docker network with the arr-stack, it uses `host.docker.internal` — a hostname that resolves to the host machine from inside any container. The `extra_hosts` line in `docker-compose.yaml` enables this on Linux:

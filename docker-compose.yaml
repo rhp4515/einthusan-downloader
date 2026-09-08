@@ -14,6 +14,10 @@ services:
       - /volume2/arr-data/media/manual_imports:/data/media/manual_imports
     environment:
       - STAGING_DIR_HOST=/data/media/manual_imports
+      # Override in .env if Radarr mounts the shared staging folder at a
+      # different path than this container does (e.g. Radarr on a separate
+      # host/NAS). Defaults to STAGING_DIR_HOST when unset.
+      - STAGING_DIR_RADARR=${STAGING_DIR_RADARR:-/data/media/manual_imports}
       - API_PORT=8500
       - EINTHUSAN_API_KEY=${EINTHUSAN_API_KEY}
       # host.docker.internal resolves to the host machine, so Radarr at

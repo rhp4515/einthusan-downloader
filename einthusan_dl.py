@@ -95,6 +95,11 @@ def load_config() -> dict:
             "language_profile_id": int(os.environ.get("RADARR_LANGUAGE_PROFILE_ID", "1")),
         },
         "staging_host": os.environ["STAGING_DIR_HOST"],
+        # Path Radarr itself sees when scanning the staging folder. Defaults
+        # to STAGING_DIR_HOST for setups where both processes share the same
+        # mount, but must be set separately whenever Radarr runs in its own
+        # container/host with a different mapped path to that same folder.
+        "staging_radarr": os.environ.get("STAGING_DIR_RADARR", os.environ["STAGING_DIR_HOST"]),
     }
 
 
@@ -1196,8 +1201,9 @@ def _radarr_import(
         file_path = ideal_path
 
     # Trigger manual import analysis
-    # The folder path must be as seen by the Radarr container
-    staging = cfg["staging_host"]
+    # The folder path must be as seen by the Radarr container, which can
+    # differ from STAGING_DIR_HOST when Radarr runs in its own container/host.
+    staging = cfg.get("staging_radarr") or cfg["staging_host"]
     import_items = radarr.manual_import_analyze(staging, movie_id)
 
     # Filter to only the file we just downloaded

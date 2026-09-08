@@ -79,7 +79,8 @@ docker compose up --build -d
 | `EINTHUSAN_API_KEY` | Static API key for authentication (the `X-Api-Key` header) |
 | `API_PORT` | Port for the HTTP API service (default: `8500`) |
 | `EINTHUSAN_API_BASE` | URL of the API service (used by `app.py`; defaults to `http://localhost:8500` locally, `http://einthusan-api:8500` in Docker) |
-| `STAGING_DIR_HOST` | Staging folder path (same mount point used by both containers) |
+| `STAGING_DIR_HOST` | Staging folder path as seen by this API process |
+| `STAGING_DIR_RADARR` | Staging folder path as seen by Radarr itself (optional, defaults to `STAGING_DIR_HOST`; set separately when Radarr runs in its own container/host with a different mount point for the same shared folder — used only for the `manual_import_analyze`/`downloaded_movies_scan` calls) |
 | `RADARR_ROOT_FOLDER` | Movies root path inside Radarr's container |
 | `RADARR_QUALITY_PROFILE_ID` | Radarr quality profile ID (default: `1`) |
 | `RADARR_LANGUAGE_PROFILE_ID` | Radarr language profile ID (default: `1`) |

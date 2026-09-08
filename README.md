@@ -57,6 +57,9 @@ RADARR_LANGUAGE_PROFILE_ID=1
 
 # Paths
 STAGING_DIR_HOST=/data/media/manual_imports    # as seen by the API container
+# Optional — only needed if Radarr runs in its own container/host and mounts
+# the same shared folder at a different path. Defaults to STAGING_DIR_HOST.
+STAGING_DIR_RADARR=/data/media/manual_imports  # as seen by the Radarr container
 
 # API service (api/)
 EINTHUSAN_API_KEY=choose-a-long-random-value
@@ -101,6 +104,8 @@ The staging directory is mounted at the same path in both containers so Radarr c
 volumes:
   - /volume2/arr-data/media/manual_imports:/data/media/manual_imports
 ```
+
+If Radarr runs on a different host/container and mounts that same shared folder at a different path, set `STAGING_DIR_RADARR` in `.env` to the path *Radarr* sees — otherwise Radarr's manual-import scan will find no files and the import will fail.
 
 ---
 

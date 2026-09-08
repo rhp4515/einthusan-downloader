@@ -1,23 +1,44 @@
 services:
-  einthusan-downloader:
+  einthusan-api:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: einthusan-downloader
+    container_name: einthusan-api
     restart: unless-stopped
     user: "1006:100"   # arr-user:users — files land with correct ownership, no chown needed
+    command: ["/app/.venv/bin/python3", "-m", "api"]
     ports:
-      - "8502:8501"          # access at http://<your-server-ip>:8502
+      - "8503:8000"           # Flutter/other HTTP clients hit http://<host>:8503
     volumes:
       - ./.env:/app/.env:ro  # credentials (read-only)
       - /volume2/arr-data/media/manual_imports:/data/media/manual_imports
     environment:
       - STAGING_DIR_HOST=/data/media/manual_imports
-      - DOWNLOAD_CHOWN=${DOWNLOAD_CHOWN}
+      - API_PORT=8000
       # host.docker.internal resolves to the host machine, so Radarr at
       # localhost:7878 is reachable from inside the container.
       # Override in .env if Radarr is on a different machine.
       - RADARR_URL=http://host.docker.internal:7878
-    # Needed on Linux for host.docker.internal to resolve correctly
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "/app/.venv/bin/python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health')"]
+      interval: 30s
+      timeout: 10s
+      start_period: 15s
+      retries: 3
+
+  einthusan-ui:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: einthusan-ui
+    restart: unless-stopped
+    user: "1006:100"
+    depends_on:
+      - einthusan-api
+    ports:
+      - "8502:8501"          # access at http://<your-server-ip>:8502
+    environment:
+      - EINTHUSAN_API_BASE=http://einthusan-api:8000
+      - EINTHUSAN_API_KEY=${EINTHUSAN_API_KEY}

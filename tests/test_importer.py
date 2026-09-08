@@ -364,3 +364,13 @@ class TestRunDownloadAndImport:
             run_download_and_import(CFG, resolved=_resolved_movie(), candidate=SABDHAM_CANDIDATE, radarr_movie_id=42)
 
         resolve_spy.assert_not_called()
+
+    def test_falls_back_to_downloaded_movies_scan_when_approve_fails(self, monkeypatch):
+        fake_radarr = self._fake_radarr(monkeypatch)
+        fake_radarr.manual_import_approve.side_effect = RuntimeError("Radarr 500")
+        self._fake_einthusan_new(monkeypatch)
+
+        run_download_and_import(CFG, resolved=_resolved_movie(), candidate=SABDHAM_CANDIDATE, radarr_movie_id=42)
+
+        expected_path = str(Path(CFG["staging_host"]) / "Sabdham (2025).mp4")
+        fake_radarr.downloaded_movies_scan.assert_called_once_with(expected_path)

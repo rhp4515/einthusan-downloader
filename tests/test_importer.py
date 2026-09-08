@@ -16,11 +16,13 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import importer
 from importer import (
+    DownloadError,
     ImportFailedError,
     ResolveError,
     ResolvedMovie,
     TmdbCandidate,
     resolve_movie,
+    run_download_and_import,
 )
 
 CFG = {
@@ -250,3 +252,115 @@ class TestRemoveFromRadarr:
 
         with pytest.raises(importer.RadarrUnavailableError):
             remove_from_radarr(CFG, 42)
+
+
+def _resolved_movie(session=None):
+    return ResolvedMovie(
+        einthusan_title="Sabdham",
+        einthusan_year=2025,
+        einthusan_url="https://einthusan.tv/movie/watch/abc123/",
+        video_url="https://cdn1.einthusan.io/movie.mp4",
+        session=session or MagicMock(),
+        candidates=[SABDHAM_CANDIDATE],
+    )
+
+
+class TestRunDownloadAndImport:
+    def _fake_radarr(self, monkeypatch, *, existing_movie=None, import_items=None):
+        fake_radarr = MagicMock()
+        fake_radarr.get_existing_movie.return_value = existing_movie or {"id": 42, "monitored": False, "tmdbId": 111}
+        fake_radarr.rescan_movie.return_value = 1
+        fake_radarr.wait_for_command.return_value = True
+        fake_radarr.get_language_id.return_value = 11
+        fake_radarr.manual_import_analyze.return_value = (
+            import_items if import_items is not None else [{"id": 9, "path": "/data/media/manual_imports/Sabdham (2025).mp4", "movie": {"id": 42}, "quality": {}}]
+        )
+        monkeypatch.setattr(importer, "RadarrClient", MagicMock(return_value=fake_radarr))
+        return fake_radarr
+
+    def _fake_einthusan_new(self, monkeypatch, download_side_effect=None):
+        fake_client = MagicMock()
+        if download_side_effect:
+            fake_client.download.side_effect = download_side_effect
+        else:
+            fake_client.download.return_value = Path("/data/media/manual_imports/Sabdham (2025).mp4")
+        monkeypatch.setattr(
+            importer.EinthusanClient, "__new__", MagicMock(return_value=fake_client)
+        )
+        return fake_client
+
+    def test_happy_path_downloads_and_imports(self, monkeypatch):
+        fake_radarr = self._fake_radarr(monkeypatch)
+        fake_client = self._fake_einthusan_new(monkeypatch)
+
+        dest = run_download_and_import(
+            CFG, resolved=_resolved_movie(), candidate=SABDHAM_CANDIDATE, radarr_movie_id=42,
+        )
+
+        assert dest.name == "Sabdham (2025).mp4"
+        fake_client.download.assert_called_once()
+        fake_radarr.manual_import_approve.assert_called_once()
+
+    def test_flips_monitored_true_before_downloading(self, monkeypatch):
+        fake_radarr = self._fake_radarr(monkeypatch, existing_movie={"id": 42, "monitored": False, "tmdbId": 111})
+        self._fake_einthusan_new(monkeypatch)
+
+        run_download_and_import(CFG, resolved=_resolved_movie(), candidate=SABDHAM_CANDIDATE, radarr_movie_id=42)
+
+        fake_radarr.update_movie.assert_called_once()
+        sent_movie = fake_radarr.update_movie.call_args[0][0]
+        assert sent_movie["monitored"] is True
+
+    def test_does_not_repatch_if_already_monitored(self, monkeypatch):
+        fake_radarr = self._fake_radarr(monkeypatch, existing_movie={"id": 42, "monitored": True, "tmdbId": 111})
+        self._fake_einthusan_new(monkeypatch)
+
+        run_download_and_import(CFG, resolved=_resolved_movie(), candidate=SABDHAM_CANDIDATE, radarr_movie_id=42)
+
+        fake_radarr.update_movie.assert_not_called()
+
+    def test_raises_import_failed_when_no_match(self, monkeypatch):
+        self._fake_radarr(monkeypatch, import_items=[])
+        self._fake_einthusan_new(monkeypatch)
+
+        with pytest.raises(ImportFailedError):
+            run_download_and_import(CFG, resolved=_resolved_movie(), candidate=SABDHAM_CANDIDATE, radarr_movie_id=42)
+
+    def test_retries_download_once_with_fresh_session_on_failure(self, monkeypatch):
+        fake_radarr = self._fake_radarr(monkeypatch)
+        fresh_resolved = _resolved_movie()
+        monkeypatch.setattr(importer, "resolve_movie", MagicMock(return_value=fresh_resolved))
+
+        call_count = {"n": 0}
+
+        def flaky_download(*args, **kwargs):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                raise RuntimeError("403 Forbidden")
+            return Path("/data/media/manual_imports/Sabdham (2025).mp4")
+
+        self._fake_einthusan_new(monkeypatch, download_side_effect=flaky_download)
+
+        dest = run_download_and_import(CFG, resolved=_resolved_movie(), candidate=SABDHAM_CANDIDATE, radarr_movie_id=42)
+
+        assert call_count["n"] == 2
+        assert dest.name == "Sabdham (2025).mp4"
+
+    def test_raises_download_error_when_retry_also_fails(self, monkeypatch):
+        self._fake_radarr(monkeypatch)
+        monkeypatch.setattr(importer, "resolve_movie", MagicMock(return_value=_resolved_movie()))
+        self._fake_einthusan_new(monkeypatch, download_side_effect=RuntimeError("403 Forbidden"))
+
+        with pytest.raises(DownloadError):
+            run_download_and_import(CFG, resolved=_resolved_movie(), candidate=SABDHAM_CANDIDATE, radarr_movie_id=42)
+
+    def test_propagates_download_cancelled_without_retry(self, monkeypatch):
+        self._fake_radarr(monkeypatch)
+        resolve_spy = MagicMock()
+        monkeypatch.setattr(importer, "resolve_movie", resolve_spy)
+        self._fake_einthusan_new(monkeypatch, download_side_effect=importer.DownloadCancelled("stopped"))
+
+        with pytest.raises(importer.DownloadCancelled):
+            run_download_and_import(CFG, resolved=_resolved_movie(), candidate=SABDHAM_CANDIDATE, radarr_movie_id=42)
+
+        resolve_spy.assert_not_called()

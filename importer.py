@@ -199,3 +199,120 @@ def remove_from_radarr(
     except Exception as exc:
         _log(on_log, "ERROR", f"Failed to remove movie from Radarr: {exc}")
         raise RadarrUnavailableError(str(exc)) from exc
+
+
+# ── Download + import ────────────────────────────────────────────────────
+
+def run_download_and_import(
+    cfg: dict,
+    *,
+    resolved: ResolvedMovie,
+    candidate: TmdbCandidate,
+    radarr_movie_id: int,
+    on_progress: OnProgress | None = None,
+    on_log: OnLog | None = None,
+) -> Path:
+    """Download the resolved video and hand it to Radarr's manual import.
+
+    On a download failure that isn't a cancellation, re-resolves the
+    Einthusan session once (the CDN-signed URL may have expired) and retries
+    the download exactly once before giving up.
+    """
+    radarr = RadarrClient(cfg["radarr"]["url"], cfg["radarr"]["api_key"])
+
+    # Flip monitored=True now that the user has verified the match.
+    try:
+        movie = radarr.get_existing_movie(candidate.tmdb_id)
+        if movie and not movie.get("monitored"):
+            movie["monitored"] = True
+            radarr.update_movie(movie)
+    except Exception as exc:
+        _log(on_log, "WARNING", f"Could not set movie monitored: {exc}")
+
+    _log(on_log, "INFO", "Waiting for Radarr to create the movie folder …")
+    cmd_id = radarr.rescan_movie(radarr_movie_id)
+    if cmd_id:
+        radarr.wait_for_command(cmd_id, timeout=30)
+
+    ext = detect_extension(resolved.video_url)
+    filename = safe_filename(candidate.title, candidate.year, ext)
+    dest_path = Path(cfg["staging_host"]) / filename
+
+    _log(on_log, "INFO", f"Downloading to: {dest_path}")
+    _download_with_retry(cfg, resolved, dest_path, on_progress=on_progress, on_log=on_log)
+
+    _manual_import(cfg, radarr, radarr_movie_id, dest_path, on_log=on_log)
+
+    return dest_path
+
+
+def _download_with_retry(
+    cfg: dict,
+    resolved: ResolvedMovie,
+    dest_path: Path,
+    *,
+    on_progress: OnProgress | None,
+    on_log: OnLog | None,
+) -> None:
+    client = EinthusanClient.__new__(EinthusanClient)
+    client.session = resolved.session
+    try:
+        client.download(resolved.video_url, dest_path, on_progress=on_progress)
+        return
+    except DownloadCancelled:
+        raise
+    except Exception as exc:
+        _log(on_log, "WARNING", f"Download failed ({exc}); re-resolving Einthusan session and retrying once …")
+
+    try:
+        fresh = resolve_movie(cfg, resolved.einthusan_url, on_log=on_log)
+    except ResolveError as re_exc:
+        raise DownloadError(f"Download failed and re-resolve also failed: {re_exc}") from re_exc
+
+    retry_client = EinthusanClient.__new__(EinthusanClient)
+    retry_client.session = fresh.session
+    try:
+        retry_client.download(fresh.video_url, dest_path, on_progress=on_progress)
+    except DownloadCancelled:
+        raise
+    except Exception as retry_exc:
+        raise DownloadError(str(retry_exc)) from retry_exc
+
+
+def _manual_import(cfg: dict, radarr: RadarrClient, radarr_movie_id: int, dest_path: Path, *, on_log: OnLog | None) -> None:
+    radarr_file_path = str(Path(cfg["staging_host"]) / dest_path.name)
+    try:
+        tamil_lang_id = radarr.get_language_id("Tamil")
+        _log(on_log, "INFO", "Asking Radarr to analyse the staging folder …")
+        import_items = radarr.manual_import_analyze(cfg["staging_host"], radarr_movie_id)
+        matching = [i for i in import_items if Path(i["path"]).name == dest_path.name]
+
+        if not matching:
+            all_paths = [i.get("path", "") for i in import_items]
+            raise ImportFailedError(
+                f"Radarr could not see '{dest_path.name}' in the staging folder. "
+                f"Files Radarr did see: {all_paths or 'none'}"
+            )
+
+        radarr.manual_import_approve(
+            matching,
+            language_id=tamil_lang_id,
+            language_name="Tamil",
+            release_group="einthusan",
+            movie_id=radarr_movie_id,
+        )
+        _log(on_log, "INFO", "Import submitted to Radarr ✓")
+        cmd_id = radarr.rescan_movie(radarr_movie_id)
+        if cmd_id:
+            radarr.wait_for_command(cmd_id, timeout=60)
+    except ImportFailedError:
+        raise
+    except Exception as imp_exc:
+        _log(on_log, "WARNING", f"Manual import API failed ({imp_exc}). Falling back to DownloadedMoviesScan …")
+        try:
+            radarr.downloaded_movies_scan(radarr_file_path)
+            cmd_id = radarr.rescan_movie(radarr_movie_id)
+            if cmd_id:
+                radarr.wait_for_command(cmd_id, timeout=60)
+        except Exception as scan_exc:
+            raise ImportFailedError(f"Both manual import and DownloadedMoviesScan failed: {scan_exc}") from scan_exc

@@ -185,6 +185,44 @@ class EinthusanClient:
         log.info("Session cookies set — skipping form login.")
         self._logged_in = True
 
+    @staticmethod
+    def _instrument_page(page, label: str = "browser") -> None:
+        """Mirror the headless browser's activity into our logs.
+
+        Playwright is otherwise a black box: when Einthusan changes its JS the
+        only symptom is a timeout, with no clue whether the page 404'd, a script
+        threw, or the request never fired.  Request bodies are deliberately not
+        logged — the login payload carries the password.
+        """
+        interesting = {"document", "xhr", "fetch", "script"}
+
+        def on_request(req):
+            if req.resource_type in interesting:
+                log.debug(f"[{label}] → {req.method} {req.url} ({req.resource_type})")
+
+        def on_response(resp):
+            if resp.request.resource_type in interesting:
+                level = log.debug if resp.status < 400 else log.warning
+                level(f"[{label}] ← HTTP {resp.status} {resp.url}")
+
+        def on_failed(req):
+            log.warning(f"[{label}] ✗ request failed: {req.method} {req.url} "
+                        f"({(req.failure or 'unknown')})")
+
+        def on_console(msg):
+            if msg.type in ("error", "warning"):
+                log.debug(f"[{label}] console.{msg.type}: {msg.text[:300]}")
+
+        def on_pageerror(err):
+            log.warning(f"[{label}] uncaught page error: {str(err)[:300]}")
+
+        page.on("request", on_request)
+        page.on("response", on_response)
+        page.on("requestfailed", on_failed)
+        page.on("console", on_console)
+        page.on("pageerror", on_pageerror)
+        page.on("load", lambda _p: log.debug(f"[{label}] load event: {page.url}"))
+
     def _browser_login(self) -> None:
         """
         Login via Einthusan's arc65.page event bus.
@@ -201,7 +239,10 @@ class EinthusanClient:
             browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
             ctx = browser.new_context(user_agent=self.HEADERS["User-Agent"])
             page = ctx.new_page()
+            self._instrument_page(page, "login")
+            log.info("Headless Chromium launched.")
 
+            started = time.monotonic()
             try:
                 page.goto(login_url, timeout=30_000)
             except PlaywrightTimeout:
@@ -209,7 +250,7 @@ class EinthusanClient:
                 raise RuntimeError("Timed out loading Einthusan login page.")
 
             page.wait_for_load_state("load")
-            log.debug(f"Page loaded: {page.url!r}")
+            log.info(f"Login page loaded in {(time.monotonic() - started) * 1000:.0f} ms: {page.url}")
 
             # Wait for the arc65.page event bus (always present; UILogin registers on it)
             try:
@@ -218,6 +259,7 @@ class EinthusanClient:
                     "&& typeof arc65.page.send === 'function'",
                     timeout=10_000,
                 )
+                log.info("arc65.page event bus ready.")
             except PlaywrightTimeout:
                 browser.close()
                 raise RuntimeError(
@@ -225,7 +267,8 @@ class EinthusanClient:
                 )
 
             # Send credentials and wait for the /ajax/login/ response in one step.
-            log.info("Sending login credentials via browser …")
+            log.info(f"Sending login credentials for {self.username!r} via arc65.page.send('Login', …) …")
+            login_started = time.monotonic()
             try:
                 with page.expect_response(
                     lambda r: "einthusan.tv/ajax/login" in r.url,
@@ -244,7 +287,12 @@ class EinthusanClient:
                 data = resp.json()
             except Exception:
                 data = {}
-            log.debug(f"Login API: HTTP {resp.status} → {data!r}")
+            log.info(
+                f"Login API responded: HTTP {resp.status} in "
+                f"{(time.monotonic() - login_started) * 1000:.0f} ms "
+                f"(Event={data.get('Event')!r})"
+            )
+            log.debug(f"Login API body: {data!r}")
 
             # The API always returns HTTP 200; success/failure is in the JSON body.
             if data.get("Event") == "UserMessage" and data.get("Data", {}).get("Err"):
@@ -257,7 +305,7 @@ class EinthusanClient:
 
             cookies = ctx.cookies()
             einthusan_cookies = [c["name"] for c in cookies if "einthusan" in (c.get("domain") or "")]
-            log.debug(f"Einthusan cookies acquired: {einthusan_cookies}")
+            log.info(f"Acquired {len(einthusan_cookies)} Einthusan cookie(s): {einthusan_cookies}")
             browser.close()
 
         for c in cookies:
@@ -373,7 +421,13 @@ class EinthusanClient:
             self.login()
 
         log.info(f"Fetching movie page: {url}")
+        started = time.monotonic()
         resp = self.session.get(url, timeout=30)
+        log.info(
+            f"Movie page → HTTP {resp.status_code} in "
+            f"{(time.monotonic() - started) * 1000:.0f} ms "
+            f"({len(resp.content) / 1024:.0f} KB, final URL: {resp.url})"
+        )
         resp.raise_for_status()
 
         if "login" in resp.url.lower():
@@ -690,6 +744,12 @@ class EinthusanClient:
         log.info(f"Destination: {dest_path}")
 
         resp = self.session.get(video_url, headers=headers, stream=True, timeout=60)
+        log.info(
+            f"CDN responded: HTTP {resp.status_code} "
+            f"(Content-Length={resp.headers.get('Content-Length', '?')}, "
+            f"Content-Type={resp.headers.get('Content-Type', '?')}, "
+            f"Accept-Ranges={resp.headers.get('Accept-Ranges', '-')})"
+        )
 
         if existing_size and resp.status_code == 416:
             # Stale partial file — CDN token may have rotated; start over
@@ -737,6 +797,14 @@ class EinthusanClient:
 
 # ── Radarr client ─────────────────────────────────────────────────────────────
 
+def _json_snippet(payload, limit: int = 2000) -> str:
+    """Best-effort JSON rendering for debug logs; never raises on odd objects."""
+    try:
+        return json.dumps(payload)[:limit]
+    except (TypeError, ValueError):
+        return repr(payload)[:limit]
+
+
 class RadarrClient:
     """Wraps the Radarr v3 API for movie management and manual import."""
 
@@ -748,18 +816,83 @@ class RadarrClient:
             "Content-Type": "application/json",
         })
 
-    def _get(self, path: str, **params) -> requests.Response:
-        resp = self.session.get(f"{self.base}{path}", params=params, timeout=30)
+    @staticmethod
+    def _summarise(payload) -> str:
+        """One-line description of a request/response body for the INFO log.
+
+        Radarr movie records are hundreds of lines, so log their shape here and
+        keep the full JSON for the DEBUG stream.
+        """
+        if payload is None:
+            return "-"
+        if isinstance(payload, list):
+            return f"list[{len(payload)}]"
+        if isinstance(payload, dict):
+            for key in ("name", "title", "label"):
+                if key in payload:
+                    return f"{{{key}={payload[key]!r}, {len(payload)} keys}}"
+            return f"{{{len(payload)} keys}}"
+        return type(payload).__name__
+
+    def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict | None = None,
+        json_body=None,
+        timeout: int = 30,
+    ) -> requests.Response:
+        """Single choke point for every Radarr call, so all of them get logged.
+
+        The API key travels in a session header and is never part of the URL or
+        the bodies logged here.
+        """
+        url = f"{self.base}{path}"
+        qs = f"?{urllib.parse.urlencode(params)}" if params else ""
+        if json_body is not None and log.isEnabledFor(logging.DEBUG):
+            log.debug(f"Radarr → {method} {path}{qs} body={_json_snippet(json_body)}")
+
+        started = time.monotonic()
+        try:
+            resp = self.session.request(
+                method, url, params=params, json=json_body, timeout=timeout
+            )
+        except Exception as exc:
+            elapsed = (time.monotonic() - started) * 1000
+            log.error(f"Radarr {method} {path}{qs} → FAILED after {elapsed:.0f} ms: {exc}")
+            raise
+
+        elapsed = (time.monotonic() - started) * 1000
+        try:
+            parsed = resp.json()
+        except Exception:
+            parsed = None
+
+        level = log.info if resp.ok else log.error
+        level(
+            f"Radarr {method} {path}{qs} → HTTP {resp.status_code} "
+            f"({elapsed:.0f} ms, {self._summarise(json_body)} → {self._summarise(parsed)})"
+        )
+        if not resp.ok:
+            log.error(f"Radarr {method} {path} error body: {resp.text[:500]}")
+        elif parsed is not None and log.isEnabledFor(logging.DEBUG):
+            log.debug(f"Radarr ← {method} {path} body={_json_snippet(parsed)}")
+
         resp.raise_for_status()
         return resp
 
-    def _post(self, path: str, payload: dict) -> requests.Response:
-        resp = self.session.post(f"{self.base}{path}", json=payload, timeout=30)
-        if not resp.ok:
-            body = resp.text[:500]
-            log.error(f"Radarr POST {path} → HTTP {resp.status_code}: {body}")
-        resp.raise_for_status()
-        return resp
+    def _get(self, path: str, **params) -> requests.Response:
+        return self._request("GET", path, params=params)
+
+    def _post(self, path: str, payload) -> requests.Response:
+        return self._request("POST", path, json_body=payload)
+
+    def _put(self, path: str, payload) -> requests.Response:
+        return self._request("PUT", path, json_body=payload)
+
+    def _delete(self, path: str, **params) -> requests.Response:
+        return self._request("DELETE", path, params=params)
 
     # ── Health check ──────────────────────────────────────────────────────────
 
@@ -849,32 +982,16 @@ class RadarrClient:
             log.debug("Movie already has all required tags; no update needed.")
             return
         movie["tags"] = merged
-        resp = self.session.put(
-            f"{self.base}/api/v3/movie/{movie['id']}",
-            json=movie,
-            timeout=30,
-        )
-        resp.raise_for_status()
+        self._put(f"/api/v3/movie/{movie['id']}", movie)
         log.info(f"Updated tags on movie id={movie['id']}: {merged}")
 
     def update_movie(self, movie: dict) -> dict:
         """PUT the full movie record back to Radarr (e.g. after flipping `monitored`)."""
-        resp = self.session.put(
-            f"{self.base}/api/v3/movie/{movie['id']}",
-            json=movie,
-            timeout=30,
-        )
-        resp.raise_for_status()
-        return resp.json()
+        return self._put(f"/api/v3/movie/{movie['id']}", movie).json()
 
     def delete_movie(self, movie_id: int, delete_files: bool = False) -> None:
         """DELETE a movie from Radarr's library."""
-        resp = self.session.delete(
-            f"{self.base}/api/v3/movie/{movie_id}",
-            params={"deleteFiles": str(delete_files).lower()},
-            timeout=30,
-        )
-        resp.raise_for_status()
+        self._delete(f"/api/v3/movie/{movie_id}", deleteFiles=str(delete_files).lower())
         log.info(f"Deleted movie id={movie_id} from Radarr (deleteFiles={delete_files})")
 
     # ── Manual import ─────────────────────────────────────────────────────────

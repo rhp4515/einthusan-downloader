@@ -20,6 +20,20 @@ from api.models import (
 
 router = APIRouter()
 
+# Documented failure shapes. FastAPI only infers 422 on its own, so the error
+# codes an API client needs to branch on are declared here and end up in
+# docs/openapi.json.
+_ERR = {"model": ErrorOut}
+AUTH_ERRORS = {401: {**_ERR, "description": "Missing or invalid X-Api-Key header (code: `unauthorized`)"}}
+JOB_ERRORS = {
+    **AUTH_ERRORS,
+    404: {**_ERR, "description": "No job with that id (code: `job_not_found`)"},
+}
+STATE_ERRORS = {
+    **JOB_ERRORS,
+    409: {**_ERR, "description": "Job is not in `awaiting_verification` (code: `invalid_state`)"},
+}
+
 
 def _job_to_out(job) -> JobOut:
     return JobOut(
@@ -39,7 +53,8 @@ def health() -> HealthOut:
     return HealthOut()
 
 
-@router.post("/movies", response_model=JobOut, status_code=202, dependencies=[Depends(require_api_key)])
+@router.post("/movies", response_model=JobOut, status_code=202, dependencies=[Depends(require_api_key)],
+             responses={**AUTH_ERRORS, 422: {**_ERR, "description": "Not a valid Einthusan movie URL (code: `invalid_url`)"}})
 def create_movie(body: CreateMovieRequest, request: Request) -> JobOut:
     if not importer.EINTHUSAN_URL_RE.match(body.url):
         raise HTTPException(
@@ -52,12 +67,14 @@ def create_movie(body: CreateMovieRequest, request: Request) -> JobOut:
     return _job_to_out(job)
 
 
-@router.get("/jobs", response_model=list[JobOut], dependencies=[Depends(require_api_key)])
+@router.get("/jobs", response_model=list[JobOut], dependencies=[Depends(require_api_key)],
+            responses=AUTH_ERRORS)
 def list_jobs(request: Request) -> list[JobOut]:
     return [_job_to_out(j) for j in request.app.state.job_store.list()]
 
 
-@router.get("/jobs/{job_id}", response_model=JobOut, dependencies=[Depends(require_api_key)])
+@router.get("/jobs/{job_id}", response_model=JobOut, dependencies=[Depends(require_api_key)],
+            responses=JOB_ERRORS)
 def get_job(job_id: str, request: Request) -> JobOut:
     job = request.app.state.job_store.get(job_id)
     if job is None:
@@ -65,7 +82,8 @@ def get_job(job_id: str, request: Request) -> JobOut:
     return _job_to_out(job)
 
 
-@router.patch("/jobs/{job_id}", response_model=JobOut, dependencies=[Depends(require_api_key)])
+@router.patch("/jobs/{job_id}", response_model=JobOut, dependencies=[Depends(require_api_key)],
+              responses={**STATE_ERRORS, 422: {**_ERR, "description": "tmdb_id is not one of the job's candidates (code: `tmdb_not_in_candidates`)"}})
 def patch_job(job_id: str, body: PatchJobRequest, request: Request) -> JobOut:
     store = request.app.state.job_store
     job = store.get(job_id)
@@ -85,7 +103,8 @@ def patch_job(job_id: str, body: PatchJobRequest, request: Request) -> JobOut:
     return _job_to_out(store.get(job_id))
 
 
-@router.post("/jobs/{job_id}/download", response_model=JobOut, status_code=202, dependencies=[Depends(require_api_key)])
+@router.post("/jobs/{job_id}/download", response_model=JobOut, status_code=202, dependencies=[Depends(require_api_key)],
+             responses={**STATE_ERRORS, 502: {**_ERR, "description": "Radarr rejected the request (codes: `radarr_unavailable`, `import_failed`, `download_failed`)"}})
 def start_download(job_id: str, request: Request) -> JobOut:
     store = request.app.state.job_store
     job = store.get(job_id)
@@ -106,7 +125,8 @@ def start_download(job_id: str, request: Request) -> JobOut:
     return _job_to_out(store.get(job_id))
 
 
-@router.delete("/jobs/{job_id}", status_code=204, dependencies=[Depends(require_api_key)])
+@router.delete("/jobs/{job_id}", status_code=204, dependencies=[Depends(require_api_key)],
+               responses=JOB_ERRORS)
 def delete_job(job_id: str, request: Request) -> None:
     store = request.app.state.job_store
     job = store.get(job_id)

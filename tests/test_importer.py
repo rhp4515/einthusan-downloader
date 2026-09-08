@@ -87,6 +87,8 @@ class TestEinthusanUrlRegex:
         "https://einthusan.tv/movie/watch/abc123/",
         "http://einthusan.tv/movie/watch/abc123",
         "https://www.einthusan.tv/premium/movie/watch/abc123/",
+        "https://einthusan.tv/premium/movie/watch/4QmG/?lang=tamil",
+        "https://einthusan.tv/movie/watch/abc123/?lang=hindi",
     ])
     def test_accepts_valid_movie_urls(self, url):
         assert importer.EINTHUSAN_URL_RE.match(url)

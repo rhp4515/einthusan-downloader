@@ -107,7 +107,12 @@ def _page_resolving():
 
 
 def _page_preview():
-    job = _client().get_job(st.session_state["job_id"])
+    try:
+        job = _client().get_job(st.session_state["job_id"])
+    except EinthusanApiError as exc:
+        _fail(exc)
+        st.rerun()
+        return
     st.title("✅ Confirm the match")
 
     options = {f"{c.title} ({c.year}) — tmdb:{c.tmdb_id}": c.tmdb_id for c in job.candidates}

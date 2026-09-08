@@ -28,7 +28,7 @@ OnLog = Callable[[str, str], None]
 OnProgress = Callable[[int, int], None]
 
 EINTHUSAN_URL_RE = re.compile(
-    r"^https?://(?:www\.)?einthusan\.tv/(?:premium/)?movie/watch/[^/]+/?$",
+    r"^https?://(?:www\.)?einthusan\.tv/(?:premium/)?movie/watch/[^/?#]+/?(?:\?[^#]*)?(?:#.*)?$",
     re.IGNORECASE,
 )
 

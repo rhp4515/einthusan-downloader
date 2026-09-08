@@ -2,6 +2,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import requests
 import responses
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -122,6 +123,18 @@ class TestDeleteJob:
         client.delete_job("job-1")
 
         assert responses.calls[0].request.method == "DELETE"
+
+
+class TestConnectionFailure:
+    @responses.activate
+    def test_health_raises_unreachable_on_connection_error(self, client):
+        responses.add(responses.GET, f"{BASE}/api/v1/health", body=requests.exceptions.ConnectionError())
+
+        with pytest.raises(EinthusanApiError) as exc_info:
+            client.health()
+
+        assert exc_info.value.code == "unreachable"
+        assert exc_info.value.status == 0
 
 
 class TestListJobs:

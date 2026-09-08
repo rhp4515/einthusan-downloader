@@ -21,13 +21,13 @@ def load_settings(core_config: dict | None = None) -> Settings:
     `core_config` is injectable so tests don't need a real .env file;
     production callers omit it and it's loaded from einthusan_dl.load_config().
     """
+    resolved_config = core_config if core_config is not None else load_config()
     api_key = os.environ.get("EINTHUSAN_API_KEY", "")
     if not api_key:
         raise RuntimeError(
             "EINTHUSAN_API_KEY is not set. Set it in .env or the environment "
             "before starting the API server."
         )
-    resolved_config = core_config if core_config is not None else load_config()
     return Settings(api_key=api_key, core_config=resolved_config)
 
 

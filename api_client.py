@@ -61,7 +61,10 @@ class EinthusanApiClient:
         self._session.headers.update({"X-Api-Key": api_key})
 
     def _request(self, method: str, path: str, **kwargs) -> dict:
-        resp = self._session.request(method, f"{self.base_url}{path}", timeout=self.timeout, **kwargs)
+        try:
+            resp = self._session.request(method, f"{self.base_url}{path}", timeout=self.timeout, **kwargs)
+        except requests.exceptions.RequestException as exc:
+            raise EinthusanApiError("unreachable", str(exc), 0) from exc
         if not resp.ok:
             try:
                 body = resp.json()

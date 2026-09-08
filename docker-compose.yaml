@@ -15,6 +15,7 @@ services:
     environment:
       - STAGING_DIR_HOST=/data/media/manual_imports
       - API_PORT=8000
+      - EINTHUSAN_API_KEY=${EINTHUSAN_API_KEY}
       # host.docker.internal resolves to the host machine, so Radarr at
       # localhost:7878 is reachable from inside the container.
       # Override in .env if Radarr is on a different machine.

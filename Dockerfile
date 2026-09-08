@@ -19,7 +19,8 @@ RUN uv venv /app/.venv && \
     uv pip install \
         --python /app/.venv/bin/python3 \
         --no-cache \
-        requests beautifulsoup4 tqdm python-dotenv lxml "streamlit>=1.40.0" "playwright>=1.44.0"
+        requests beautifulsoup4 tqdm python-dotenv lxml "streamlit>=1.40.0" "playwright>=1.44.0" \
+        "fastapi>=0.115.0" "uvicorn[standard]>=0.32.0"
 
 # Download Chromium browser binaries into a known location
 ENV PLAYWRIGHT_BROWSERS_PATH=/pw-browsers
@@ -53,13 +54,14 @@ ENV STREAMLIT_SERVER_HEADLESS=true \
     STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
 
 # Copy application code
-COPY einthusan_dl.py app.py ./
+COPY einthusan_dl.py app.py importer.py api_client.py ./
+COPY api ./api
 
 # Make the venv and browser binaries world-readable so the container can
 # run as a non-root UID (e.g. arr-user 1006:100 set in docker-compose).
 RUN chmod -R a+rX /app /pw-browsers
 
-EXPOSE 8501
+EXPOSE 8501 8000
 
 # Health check — uses Python so no extra tools needed in the slim image
 HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
@@ -67,4 +69,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
         "import urllib.request; urllib.request.urlopen('http://localhost:8501/_stcore/health')" \
         || exit 1
 
-ENTRYPOINT ["/app/.venv/bin/streamlit", "run", "app.py", "--server.port=8501", "--server.address=0.0.0.0"]
+CMD ["/app/.venv/bin/streamlit", "run", "app.py", "--server.port=8501", "--server.address=0.0.0.0"]

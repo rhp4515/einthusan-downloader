@@ -356,17 +356,37 @@ def _manual_import(cfg: dict, radarr: RadarrClient, radarr_movie_id: int, dest_p
                 f"Files Radarr did see: {all_paths or 'none'}. {hint}"
             )
 
-        radarr.manual_import_approve(
+        import_cmd_id = radarr.manual_import_approve(
             matching,
             language_id=tamil_lang_id,
             language_name="Tamil",
             release_group="einthusan",
             movie_id=radarr_movie_id,
         )
-        _log(on_log, "INFO", "Import submitted to Radarr ✓")
+        if not import_cmd_id:
+            raise ImportFailedError(
+                "Radarr accepted the request but queued no ManualImport command, "
+                "so nothing was imported."
+            )
+        _log(on_log, "INFO", f"ManualImport command {import_cmd_id} queued — waiting for it …")
+        if not radarr.wait_for_command(import_cmd_id, timeout=180):
+            raise ImportFailedError(
+                f"Radarr's ManualImport command {import_cmd_id} did not complete successfully."
+            )
+
         cmd_id = radarr.rescan_movie(radarr_movie_id)
         if cmd_id:
             radarr.wait_for_command(cmd_id, timeout=60)
+
+        # The command can complete "successfully" having silently rejected the
+        # file, so confirm Radarr actually ended up with a movie file.
+        if not radarr.movie_has_file(radarr_movie_id):
+            raise ImportFailedError(
+                "Radarr's ManualImport command completed but the movie still has no "
+                f"file. The file may remain in '{staging_radarr}' — check Radarr's logs "
+                "(Activity → Events) for the rejection reason."
+            )
+        _log(on_log, "INFO", "Import confirmed — Radarr now has the movie file ✓")
     except ImportFailedError:
         raise
     except Exception as imp_exc:

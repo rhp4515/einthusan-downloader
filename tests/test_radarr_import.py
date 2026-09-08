@@ -222,7 +222,7 @@ class TestManualImportApprove:
             release_group="einthusan",
         )
 
-        payload = mock_post.call_args[0][1]
+        payload = mock_post.call_args[0][1]["files"]
         assert payload[0]["languages"] == [{"id": 11, "name": "Tamil"}]
 
     def test_release_group_is_einthusan(self):
@@ -236,7 +236,7 @@ class TestManualImportApprove:
             release_group="einthusan",
         )
 
-        payload = mock_post.call_args[0][1]
+        payload = mock_post.call_args[0][1]["files"]
         assert payload[0]["releaseGroup"] == "einthusan"
 
     def test_language_not_overridden_by_item_default(self):
@@ -252,7 +252,7 @@ class TestManualImportApprove:
             release_group="einthusan",
         )
 
-        payload = mock_post.call_args[0][1]
+        payload = mock_post.call_args[0][1]["files"]
         assert payload[0]["languages"] == [{"id": 11, "name": "Tamil"}]
 
     def test_default_values_are_tamil_and_einthusan(self):
@@ -262,7 +262,7 @@ class TestManualImportApprove:
 
         client.manual_import_approve([SAMPLE_IMPORT_ITEM])
 
-        payload = mock_post.call_args[0][1]
+        payload = mock_post.call_args[0][1]["files"]
         assert payload[0]["languages"] == [{"id": 1, "name": "Tamil"}]
         assert payload[0]["releaseGroup"] == "einthusan"
 
@@ -276,14 +276,34 @@ class TestManualImportApprove:
 
         mock_post.assert_not_called()
 
-    def test_posts_to_manualimport_endpoint(self):
+    def test_queues_a_manualimport_command(self):
+        """The import must be queued as a command — POST /api/v3/manualimport is
+        only the reprocess step and imports nothing."""
         client = make_client()
         mock_post = self._mock_post(client)
 
         client.manual_import_approve([SAMPLE_IMPORT_ITEM])
 
         mock_post.assert_called_once()
-        assert mock_post.call_args[0][0] == "/api/v3/manualimport"
+        endpoint, body = mock_post.call_args[0][0], mock_post.call_args[0][1]
+        assert endpoint == "/api/v3/command"
+        assert body["name"] == "ManualImport"
+        assert body["importMode"] == "move"
+        assert body["files"][0]["movieId"] == 42
+
+    def test_returns_command_id(self):
+        client = make_client()
+        post_resp = MagicMock()
+        post_resp.json.return_value = {"id": 4242}
+        client._post = MagicMock(return_value=post_resp)
+
+        assert client.manual_import_approve([SAMPLE_IMPORT_ITEM]) == 4242
+
+    def test_returns_zero_when_nothing_submitted(self):
+        client = make_client()
+        self._mock_post(client)
+
+        assert client.manual_import_approve([]) == 0
 
     def test_payload_includes_id_from_get_response(self):
         """POST payload must include 'id' from the GET analysis response (per OpenAPI spec)."""
@@ -292,7 +312,7 @@ class TestManualImportApprove:
 
         client.manual_import_approve([SAMPLE_IMPORT_ITEM])
 
-        payload = mock_post.call_args[0][1]
+        payload = mock_post.call_args[0][1]["files"]
         assert "id" in payload[0], "POST payload must include 'id' field"
         assert payload[0]["id"] == 99
 
@@ -303,7 +323,7 @@ class TestManualImportApprove:
 
         client.manual_import_approve([SAMPLE_IMPORT_ITEM])
 
-        payload = mock_post.call_args[0][1]
+        payload = mock_post.call_args[0][1]["files"]
         assert "shouldReplace" not in payload[0], (
             "'shouldReplace' is not in ManualImportReprocessResource and will cause a 400/500"
         )
@@ -315,7 +335,7 @@ class TestManualImportApprove:
 
         client.manual_import_approve([SAMPLE_IMPORT_ITEM])
 
-        payload = mock_post.call_args[0][1]
+        payload = mock_post.call_args[0][1]["files"]
         assert payload[0]["movieId"] == 42
         assert isinstance(payload[0]["movieId"], int)
 

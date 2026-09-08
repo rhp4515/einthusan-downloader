@@ -925,23 +925,29 @@ class RadarrClient:
         language_name: str = "Tamil",
         release_group: str = "einthusan",
         movie_id: int = 0,
-    ) -> None:
+        import_mode: str = "move",
+    ) -> int:
         """
-        POST /api/v3/manualimport — submit import decisions to Radarr.
+        POST /api/v3/command {"name": "ManualImport"} — queue the real import.
 
-        Body is an array of ManualImportReprocessResource.  Key differences from
-        what we had before (fixed per the OpenAPI spec):
-          • include `id` from the GET response (Radarr uses it to find the file)
-          • `movieId` is a direct int field, not nested
-          • removed `shouldReplace` — not in the spec and rejected by
-            `additionalProperties: false`
+        `POST /api/v3/manualimport` looks like the endpoint for this, but it is
+        only the *reprocess* step: it re-runs the analysis, echoes the decisions
+        back with a 200, and imports nothing.  The file moves only once a
+        ManualImport command is queued.
+
+        Each file entry carries:
+          • `id` from the GET response (Radarr uses it to find the file)
+          • `movieId` as a direct int field, not nested
+          • no `shouldReplace` — rejected by `additionalProperties: false`
 
         movie_id: fallback Radarr movie ID used when Radarr's analyze step
           returns items with movie=null (auto-match failed).
+
+        Returns the Radarr command ID, or 0 when nothing was submitted.
         """
         if not items:
             log.warning("No items to import.")
-            return
+            return 0
         payload = []
         for item in items:
             matched_movie_id = (item.get("movie") or {}).get("id") or movie_id
@@ -970,15 +976,21 @@ class RadarrClient:
                 "Radarr could not match any file to a movie automatically.\n"
                 "You may need to import manually via the Radarr UI."
             )
-            return
+            return 0
         for entry in payload:
             log.info(
                 f"  Importing: {Path(entry['path']).name}  "
                 f"movieId={entry['movieId']}  quality={entry['quality'].get('quality',{}).get('name','?')}"
             )
         log.info(f"Submitting import for {len(payload)} file(s) …")
-        self._post("/api/v3/manualimport", payload)
-        log.info("Import submitted successfully.")
+        resp = self._post("/api/v3/command", {
+            "name":       "ManualImport",
+            "importMode": import_mode,
+            "files":      payload,
+        })
+        command_id = resp.json().get("id", 0)
+        log.info(f"ManualImport command queued (id={command_id}).")
+        return command_id
 
     def downloaded_movies_scan(self, file_path: str) -> None:
         """
@@ -994,6 +1006,19 @@ class RadarrClient:
             "path": file_path,
         })
         log.info("DownloadedMoviesScan command sent.")
+
+    def movie_has_file(self, movie_id: int) -> bool:
+        """True when Radarr has a movie file registered for this movie.
+
+        A ManualImport command reports success even when every file was
+        rejected, so this is the only reliable confirmation that the import
+        actually landed.
+        """
+        try:
+            return bool(self._get(f"/api/v3/movie/{movie_id}").json().get("hasFile"))
+        except Exception as exc:
+            log.warning(f"Could not confirm whether movie {movie_id} has a file: {exc}")
+            return False
 
     # ── Rescan ────────────────────────────────────────────────────────────────
 
@@ -1223,22 +1248,33 @@ def _radarr_import(
         log.info(f"Files seen by Radarr analysis: {[i['path'] for i in import_items]}")
         return
 
-    radarr.manual_import_approve(
+    import_cmd_id = radarr.manual_import_approve(
         matching,
         language_id=tamil_language_id,
         language_name="Tamil",
         release_group="einthusan",
         movie_id=movie_id,
     )
+    if import_cmd_id:
+        radarr.wait_for_command(import_cmd_id, timeout=180)
 
     # Final rescan to confirm
     time.sleep(3)
     radarr.rescan_movie(movie_id)
+
+    if not radarr.movie_has_file(movie_id):
+        log.error(
+            f"Radarr still has no file for '{movie_title} ({movie_year})' — the import "
+            f"did not land. The file is still at: {file_path}\n"
+            "Check Radarr's Activity → Events for the rejection reason."
+        )
+        sys.exit(1)
+
     log.info(
         f"\n✓ Done! '{movie_title} ({movie_year})' should now appear in Jellyfin.\n"
         f"  Radarr ID : {movie_id}\n"
         f"  TMDB ID   : {tmdb_id}\n"
-        f"  File      : {file_path}"
+        f"  Imported from : {file_path}"
     )
 
 

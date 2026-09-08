@@ -62,7 +62,8 @@ docker compose up --build -d
 
 **`RadarrClient`** wraps Radarr v3 API:
 - `manual_import_analyze(folder, movie_id)` → GET `/api/v3/manualimport`; `filterExistingFiles` must be Python `False` (bool), not string
-- `manual_import_approve(items, ...)` → POST `/api/v3/manualimport`; payload requires `id` from GET response, `movieId` as direct int, no `shouldReplace` (schema uses `additionalProperties: false`)
+- `manual_import_approve(items, ...)` → POST `/api/v3/command` with `{"name": "ManualImport", "importMode": "move", "files": [...]}`; returns the command ID. **Do not POST to `/api/v3/manualimport`** — that is only the *reprocess* endpoint: it re-runs the analysis, echoes the decisions back with a 200 and imports nothing (silent no-op). Each file entry requires `id` from the GET response, `movieId` as direct int, no `shouldReplace` (schema uses `additionalProperties: false`)
+- `movie_has_file(movie_id)` → GET `/api/v3/movie/{id}` `hasFile`; a ManualImport command reports success even when every file was rejected, so this is the only reliable confirmation the import landed
 - `rescan_movie(movie_id)` → returns command ID (int)
 - `wait_for_command(command_id, timeout)` → polls `GET /api/v3/command/{id}` until `completed`/`failed`
 

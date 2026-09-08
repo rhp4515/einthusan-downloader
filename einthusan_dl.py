@@ -814,6 +814,7 @@ class RadarrClient:
         quality_profile_id: int,
         language_profile_id: int,
         tags: list[int] | None = None,
+        monitored: bool = True,
     ) -> dict:
         """Add a movie to Radarr without triggering an automatic search."""
         payload = {
@@ -823,7 +824,7 @@ class RadarrClient:
             "qualityProfileId": quality_profile_id,
             "languageProfileId": language_profile_id,
             "rootFolderPath": root_folder,
-            "monitored": True,
+            "monitored": monitored,
             "tags": tags or [],
             "addOptions": {
                 "searchForMovie": False,
@@ -850,6 +851,26 @@ class RadarrClient:
         )
         resp.raise_for_status()
         log.info(f"Updated tags on movie id={movie['id']}: {merged}")
+
+    def update_movie(self, movie: dict) -> dict:
+        """PUT the full movie record back to Radarr (e.g. after flipping `monitored`)."""
+        resp = self.session.put(
+            f"{self.base}/api/v3/movie/{movie['id']}",
+            json=movie,
+            timeout=30,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def delete_movie(self, movie_id: int, delete_files: bool = False) -> None:
+        """DELETE a movie from Radarr's library."""
+        resp = self.session.delete(
+            f"{self.base}/api/v3/movie/{movie_id}",
+            params={"deleteFiles": str(delete_files).lower()},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        log.info(f"Deleted movie id={movie_id} from Radarr (deleteFiles={delete_files})")
 
     # ── Manual import ─────────────────────────────────────────────────────────
 

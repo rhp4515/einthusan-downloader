@@ -1,0 +1,32 @@
+name: Tests
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: [main]
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Create venv and install dependencies
+        run: |
+          uv venv --python 3.11 .venv
+          uv pip install -r requirements.txt --python .venv/bin/python3
+
+      - name: Run tests
+        run: |
+          # test_extraction.py requires examples/einthusan_source.html, a real
+          # Einthusan movie page fixture that is gitignored and not committed
+          # to the repo (see CLAUDE.md). It fails at collection on any fresh
+          # checkout, including CI, unrelated to code correctness.
+          .venv/bin/pytest tests/ -v --ignore=tests/test_extraction.py

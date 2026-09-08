@@ -99,6 +99,15 @@ class TestCreateMovie:
         assert len(body["candidates"]) == 2
         assert body["selected_tmdb_id"] == 111
 
+    def test_accepts_url_with_query_string(self, client, auth_headers, monkeypatch):
+        url = "https://einthusan.tv/movie/watch/abc123/?lang=tamil"
+        monkeypatch.setattr(importer, "resolve_movie", MagicMock(return_value=_resolved(url)))
+
+        resp = client.post("/api/v1/movies", json={"url": url}, headers=auth_headers)
+
+        assert resp.status_code != 422
+        assert resp.status_code == 202
+
     def test_resolve_failure_surfaces_as_resolve_failed(self, client, auth_headers, monkeypatch):
         url = "https://einthusan.tv/movie/watch/abc123/"
         monkeypatch.setattr(importer, "resolve_movie", MagicMock(side_effect=importer.ResolveError("no results")))

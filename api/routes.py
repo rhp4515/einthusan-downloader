@@ -116,7 +116,7 @@ def delete_job(job_id: str, request: Request) -> None:
         store.update(job_id, cancelled=True)
     if job.radarr_movie_id and job.state != "done":
         try:
-            importer.remove_from_radarr(request.app.state.settings.core_config, job.radarr_movie_id, delete_files=True)
+            importer.remove_from_radarr(request.app.state.settings.core_config, job.radarr_movie_id, delete_files=False)
         except importer.ImporterError:
             pass
     store.delete(job_id)

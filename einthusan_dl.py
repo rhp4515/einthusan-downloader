@@ -842,11 +842,16 @@ class RadarrClient:
         params: dict | None = None,
         json_body=None,
         timeout: int = 30,
+        expected_errors: tuple[int, ...] = (),
     ) -> requests.Response:
         """Single choke point for every Radarr call, so all of them get logged.
 
         The API key travels in a session header and is never part of the URL or
         the bodies logged here.
+
+        expected_errors: status codes the caller anticipates and handles itself.
+          These are logged as DEBUG rather than ERROR, so a routine retry path
+          doesn't emit a stack trace that looks like a real failure.
         """
         url = f"{self.base}{path}"
         qs = f"?{urllib.parse.urlencode(params)}" if params else ""
@@ -869,13 +874,20 @@ class RadarrClient:
         except Exception:
             parsed = None
 
-        level = log.info if resp.ok else log.error
+        anticipated = resp.status_code in expected_errors
+        if resp.ok:
+            level = log.info
+        elif anticipated:
+            level = log.debug
+        else:
+            level = log.error
         level(
             f"Radarr {method} {path}{qs} → HTTP {resp.status_code} "
             f"({elapsed:.0f} ms, {self._summarise(json_body)} → {self._summarise(parsed)})"
         )
         if not resp.ok:
-            log.error(f"Radarr {method} {path} error body: {resp.text[:500]}")
+            body_level = log.debug if anticipated else log.error
+            body_level(f"Radarr {method} {path} error body: {resp.text[:500]}")
         elif parsed is not None and log.isEnabledFor(logging.DEBUG):
             log.debug(f"Radarr ← {method} {path} body={_json_snippet(parsed)}")
 
@@ -1012,14 +1024,23 @@ class RadarrClient:
             params["movieId"] = movie_id
         log.info(f"Analyzing folder for import (Radarr path): {folder}")
         try:
-            resp = self._get("/api/v3/manualimport", **params)
+            resp = self._request(
+                "GET", "/api/v3/manualimport", params=params,
+                # Passing movieId makes Radarr scan that movie's library folder,
+                # which doesn't exist yet for a movie that has never had a file —
+                # it raises DirectoryNotFoundException and returns 500. Expected
+                # on every first import, and handled by the retry below.
+                expected_errors=(500,) if movie_id else (),
+            )
         except requests.HTTPError as exc:
             if exc.response is not None and exc.response.status_code == 500 and movie_id:
-                # Some Radarr versions return 500 when movieId is combined with
-                # folder scan; retry without it and let the caller filter by filename.
-                log.debug("Radarr returned 500 with movieId — retrying without it …")
+                log.info(
+                    "Radarr returned 500 for the movieId-scoped scan (its library "
+                    f"folder for movie {movie_id} doesn't exist yet) — retrying the "
+                    "folder scan without movieId and matching on filename instead."
+                )
                 params.pop("movieId")
-                resp = self._get("/api/v3/manualimport", **params)
+                resp = self._request("GET", "/api/v3/manualimport", params=params)
             else:
                 raise
         items = resp.json()

@@ -35,6 +35,12 @@ uv pip install -r requirements.txt --python .venv/bin/python3
 .venv/bin/python einthusan_dl.py --list-profiles
 ```
 
+**Regenerate the OpenAPI spec (after any change under `api/`):**
+```bash
+.venv/bin/python scripts/export_openapi.py   # writes docs/openapi.json
+```
+`docs/openapi.json` is generated from the live FastAPI app, never hand-edited, and is what client generators (e.g. the Android app) consume.
+
 **Docker:**
 ```bash
 docker compose up --build -d

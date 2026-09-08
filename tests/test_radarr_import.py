@@ -160,11 +160,14 @@ class TestAddMovieTags:
 
 class TestUpdateMovieTags:
     def _mock_put(self, client) -> MagicMock:
+        """All Radarr calls funnel through session.request so they get logged."""
         put_resp = MagicMock()
+        put_resp.ok = True
+        put_resp.status_code = 200
         put_resp.raise_for_status = MagicMock()
         mock = MagicMock(return_value=put_resp)
         client.session = MagicMock()
-        client.session.put = mock
+        client.session.request = mock
         return mock
 
     def test_adds_missing_tag_to_existing_movie(self):
@@ -390,19 +393,20 @@ class TestUpdateMovie:
     def test_puts_full_movie_record_and_returns_response(self):
         client = make_client()
         put_resp = MagicMock()
+        put_resp.ok = True
+        put_resp.status_code = 200
         put_resp.raise_for_status = MagicMock()
         put_resp.json.return_value = {"id": 42, "monitored": True}
         client.session = MagicMock()
-        client.session.put = MagicMock(return_value=put_resp)
+        client.session.request = MagicMock(return_value=put_resp)
 
         movie = {"id": 42, "monitored": True, "title": "Sabdham"}
         result = client.update_movie(movie)
 
-        client.session.put.assert_called_once_with(
-            "http://localhost:7878/api/v3/movie/42",
-            json=movie,
-            timeout=30,
-        )
+        method, url = client.session.request.call_args[0]
+        assert method == "PUT"
+        assert url == "http://localhost:7878/api/v3/movie/42"
+        assert client.session.request.call_args[1]["json"] == movie
         assert result == {"id": 42, "monitored": True}
 
 
@@ -411,29 +415,31 @@ class TestUpdateMovie:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestDeleteMovie:
-    def test_deletes_without_files_by_default(self):
-        client = make_client()
+    def _mock_delete(self, client) -> MagicMock:
         del_resp = MagicMock()
+        del_resp.ok = True
+        del_resp.status_code = 200
         del_resp.raise_for_status = MagicMock()
         client.session = MagicMock()
-        client.session.delete = MagicMock(return_value=del_resp)
+        client.session.request = MagicMock(return_value=del_resp)
+        return client.session.request
+
+    def test_deletes_without_files_by_default(self):
+        client = make_client()
+        mock_req = self._mock_delete(client)
 
         client.delete_movie(42)
 
-        client.session.delete.assert_called_once_with(
-            "http://localhost:7878/api/v3/movie/42",
-            params={"deleteFiles": "false"},
-            timeout=30,
-        )
+        mock_req.assert_called_once()
+        method, url = mock_req.call_args[0]
+        assert method == "DELETE"
+        assert url == "http://localhost:7878/api/v3/movie/42"
+        assert mock_req.call_args[1]["params"] == {"deleteFiles": "false"}
 
     def test_deletes_with_files_when_requested(self):
         client = make_client()
-        del_resp = MagicMock()
-        del_resp.raise_for_status = MagicMock()
-        client.session = MagicMock()
-        client.session.delete = MagicMock(return_value=del_resp)
+        mock_req = self._mock_delete(client)
 
         client.delete_movie(42, delete_files=True)
 
-        sent_params = client.session.delete.call_args[1]["params"]
-        assert sent_params == {"deleteFiles": "true"}
+        assert mock_req.call_args[1]["params"] == {"deleteFiles": "true"}

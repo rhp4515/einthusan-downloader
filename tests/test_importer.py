@@ -350,6 +350,36 @@ class TestRunDownloadAndImport:
         with pytest.raises(ImportFailedError):
             run_download_and_import(cfg, resolved=_resolved_movie(), candidate=SABDHAM_CANDIDATE, radarr_movie_id=42)
 
+    def test_uses_staging_radarr_for_manual_import_when_set(self, monkeypatch, tmp_path):
+        # STAGING_DIR_RADARR is the path Radarr itself sees, which can differ
+        # from staging_host (this process's own path) when Radarr runs in a
+        # separate container/host mounting the same shared folder elsewhere.
+        cfg = {**self._cfg(tmp_path), "staging_radarr": "/radarr-side/manual_imports"}
+        radarr_side_path = "/radarr-side/manual_imports/Sabdham (2025).mp4"
+        fake_radarr = self._fake_radarr(
+            monkeypatch, cfg,
+            import_items=[{"id": 9, "path": radarr_side_path, "movie": {"id": 42}, "quality": {}}],
+        )
+        self._fake_einthusan_new(monkeypatch)
+
+        run_download_and_import(cfg, resolved=_resolved_movie(), candidate=SABDHAM_CANDIDATE, radarr_movie_id=42)
+
+        fake_radarr.manual_import_analyze.assert_called_once_with("/radarr-side/manual_imports", 42)
+        fake_radarr.manual_import_approve.assert_called_once()
+
+    def test_falls_back_to_downloaded_movies_scan_using_staging_radarr_path(self, monkeypatch, tmp_path):
+        cfg = {**self._cfg(tmp_path), "staging_radarr": "/radarr-side/manual_imports"}
+        fake_radarr = self._fake_radarr(
+            monkeypatch, cfg,
+            import_items=[{"id": 9, "path": "/radarr-side/manual_imports/Sabdham (2025).mp4", "movie": {"id": 42}, "quality": {}}],
+        )
+        fake_radarr.manual_import_approve.side_effect = RuntimeError("Radarr 500")
+        self._fake_einthusan_new(monkeypatch)
+
+        run_download_and_import(cfg, resolved=_resolved_movie(), candidate=SABDHAM_CANDIDATE, radarr_movie_id=42)
+
+        fake_radarr.downloaded_movies_scan.assert_called_once_with("/radarr-side/manual_imports/Sabdham (2025).mp4")
+
     def test_retries_download_once_with_fresh_session_on_failure(self, monkeypatch, tmp_path):
         cfg = self._cfg(tmp_path)
         fake_radarr = self._fake_radarr(monkeypatch, cfg)

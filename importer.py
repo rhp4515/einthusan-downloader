@@ -228,10 +228,10 @@ def _verify_staging_dir_writable(cfg: dict, *, on_log: OnLog | None) -> Path:
         raise DownloadError(
             f"Staging directory '{staging}' is not writable from this process: {exc}. "
             "Check STAGING_DIR_HOST (and any shell-exported STAGING_DIR_HOST, which "
-            "silently overrides .env). If Radarr runs on a different host or container "
-            "than this API process, STAGING_DIR_HOST must point at a filesystem "
-            "location BOTH processes actually share (e.g. an SMB/NFS mount at the "
-            "same absolute path on each side), not just a path valid on this side."
+            "silently overrides .env) — it must point at a folder THIS process can "
+            "write to. If Radarr sees that same shared folder at a different mount "
+            "path (its own container/host), set STAGING_DIR_RADARR separately so "
+            "the manual-import call tells Radarr the right path."
         ) from exc
     _log(on_log, "INFO", f"Staging directory verified writable: {staging}")
     return staging
@@ -321,7 +321,8 @@ def _download_with_retry(
 
 
 def _manual_import(cfg: dict, radarr: RadarrClient, radarr_movie_id: int, dest_path: Path, *, on_log: OnLog | None) -> None:
-    radarr_file_path = str(Path(cfg["staging_host"]) / dest_path.name)
+    staging_radarr = cfg.get("staging_radarr") or cfg["staging_host"]
+    radarr_file_path = str(Path(staging_radarr) / dest_path.name)
     try:
         tamil_lang_id = radarr.get_language_id("Tamil")
 
@@ -329,20 +330,20 @@ def _manual_import(cfg: dict, radarr: RadarrClient, radarr_movie_id: int, dest_p
         local_size_mb = dest_path.stat().st_size / 1e6 if local_exists else 0.0
         _log(
             on_log, "INFO",
-            f"Asking Radarr to analyse the staging folder ({cfg['staging_host']}) — "
+            f"Asking Radarr to analyse the staging folder ({staging_radarr}) — "
             f"local file exists on this process: {local_exists} ({local_size_mb:.1f} MB)",
         )
-        import_items = radarr.manual_import_analyze(cfg["staging_host"], radarr_movie_id)
+        import_items = radarr.manual_import_analyze(staging_radarr, radarr_movie_id)
         matching = [i for i in import_items if Path(i["path"]).name == dest_path.name]
 
         if not matching:
             all_paths = [i.get("path", "") for i in import_items]
             hint = (
                 "The file exists on this process's filesystem but Radarr's scan of "
-                f"'{cfg['staging_host']}' returned no files at all — Radarr likely runs on "
-                "a different host/container than this API process and does not have this "
-                "exact path mounted to the same physical location. STAGING_DIR_HOST must be "
-                "a path Radarr itself can read directly, not just this process."
+                f"'{staging_radarr}' returned no files at all — check that STAGING_DIR_RADARR "
+                "is the exact path Radarr itself sees for this folder (it can differ from "
+                "STAGING_DIR_HOST when Radarr runs in its own container/host with a "
+                "different mount point for the same shared folder)."
                 if local_exists and not all_paths
                 else "Radarr saw files in the folder but none matched this filename — check "
                 "for a stale/partial file or a filename mismatch."

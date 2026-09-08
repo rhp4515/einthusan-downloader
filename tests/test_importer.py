@@ -268,111 +268,186 @@ def _resolved_movie(session=None):
 
 
 class TestRunDownloadAndImport:
-    def _fake_radarr(self, monkeypatch, *, existing_movie=None, import_items=None):
+    """
+    Uses pytest's `tmp_path` (a real, unique, auto-cleaned temp directory per
+    test) as the staging host instead of the fake CFG['staging_host']
+    ('/data/media/manual_imports', which doesn't exist on a dev machine).
+    This lets `run_download_and_import`'s real staging-directory preflight
+    check and post-download existence check run for real against a real
+    writable directory, rather than needing to be mocked out — the fake
+    EinthusanClient's `download()` actually writes a small file to
+    `dest_path` so those real filesystem checks have something to find.
+    """
+
+    def _cfg(self, tmp_path):
+        return {**CFG, "staging_host": str(tmp_path)}
+
+    def _fake_radarr(self, monkeypatch, cfg, *, existing_movie=None, import_items=None):
         fake_radarr = MagicMock()
         fake_radarr.get_existing_movie.return_value = existing_movie or {"id": 42, "monitored": False, "tmdbId": 111}
         fake_radarr.rescan_movie.return_value = 1
         fake_radarr.wait_for_command.return_value = True
         fake_radarr.get_language_id.return_value = 11
+        default_path = str(Path(cfg["staging_host"]) / "Sabdham (2025).mp4")
         fake_radarr.manual_import_analyze.return_value = (
-            import_items if import_items is not None else [{"id": 9, "path": "/data/media/manual_imports/Sabdham (2025).mp4", "movie": {"id": 42}, "quality": {}}]
+            import_items if import_items is not None else [{"id": 9, "path": default_path, "movie": {"id": 42}, "quality": {}}]
         )
         monkeypatch.setattr(importer, "RadarrClient", MagicMock(return_value=fake_radarr))
         return fake_radarr
 
     def _fake_einthusan_new(self, monkeypatch, download_side_effect=None):
         fake_client = MagicMock()
-        if download_side_effect:
-            fake_client.download.side_effect = download_side_effect
-        else:
-            fake_client.download.return_value = Path("/data/media/manual_imports/Sabdham (2025).mp4")
+
+        def _default_download(video_url, dest_path, on_progress=None):
+            Path(dest_path).write_bytes(b"fake video content")
+            return Path(dest_path)
+
+        fake_client.download.side_effect = download_side_effect if download_side_effect is not None else _default_download
         monkeypatch.setattr(
             importer.EinthusanClient, "__new__", MagicMock(return_value=fake_client)
         )
         return fake_client
 
-    def test_happy_path_downloads_and_imports(self, monkeypatch):
-        fake_radarr = self._fake_radarr(monkeypatch)
+    def test_happy_path_downloads_and_imports(self, monkeypatch, tmp_path):
+        cfg = self._cfg(tmp_path)
+        fake_radarr = self._fake_radarr(monkeypatch, cfg)
         fake_client = self._fake_einthusan_new(monkeypatch)
 
         dest = run_download_and_import(
-            CFG, resolved=_resolved_movie(), candidate=SABDHAM_CANDIDATE, radarr_movie_id=42,
+            cfg, resolved=_resolved_movie(), candidate=SABDHAM_CANDIDATE, radarr_movie_id=42,
         )
 
         assert dest.name == "Sabdham (2025).mp4"
+        assert dest.exists()
         fake_client.download.assert_called_once()
         fake_radarr.manual_import_approve.assert_called_once()
 
-    def test_flips_monitored_true_before_downloading(self, monkeypatch):
-        fake_radarr = self._fake_radarr(monkeypatch, existing_movie={"id": 42, "monitored": False, "tmdbId": 111})
+    def test_flips_monitored_true_before_downloading(self, monkeypatch, tmp_path):
+        cfg = self._cfg(tmp_path)
+        fake_radarr = self._fake_radarr(monkeypatch, cfg, existing_movie={"id": 42, "monitored": False, "tmdbId": 111})
         self._fake_einthusan_new(monkeypatch)
 
-        run_download_and_import(CFG, resolved=_resolved_movie(), candidate=SABDHAM_CANDIDATE, radarr_movie_id=42)
+        run_download_and_import(cfg, resolved=_resolved_movie(), candidate=SABDHAM_CANDIDATE, radarr_movie_id=42)
 
         fake_radarr.update_movie.assert_called_once()
         sent_movie = fake_radarr.update_movie.call_args[0][0]
         assert sent_movie["monitored"] is True
 
-    def test_does_not_repatch_if_already_monitored(self, monkeypatch):
-        fake_radarr = self._fake_radarr(monkeypatch, existing_movie={"id": 42, "monitored": True, "tmdbId": 111})
+    def test_does_not_repatch_if_already_monitored(self, monkeypatch, tmp_path):
+        cfg = self._cfg(tmp_path)
+        fake_radarr = self._fake_radarr(monkeypatch, cfg, existing_movie={"id": 42, "monitored": True, "tmdbId": 111})
         self._fake_einthusan_new(monkeypatch)
 
-        run_download_and_import(CFG, resolved=_resolved_movie(), candidate=SABDHAM_CANDIDATE, radarr_movie_id=42)
+        run_download_and_import(cfg, resolved=_resolved_movie(), candidate=SABDHAM_CANDIDATE, radarr_movie_id=42)
 
         fake_radarr.update_movie.assert_not_called()
 
-    def test_raises_import_failed_when_no_match(self, monkeypatch):
-        self._fake_radarr(monkeypatch, import_items=[])
+    def test_raises_import_failed_when_no_match(self, monkeypatch, tmp_path):
+        cfg = self._cfg(tmp_path)
+        self._fake_radarr(monkeypatch, cfg, import_items=[])
         self._fake_einthusan_new(monkeypatch)
 
         with pytest.raises(ImportFailedError):
-            run_download_and_import(CFG, resolved=_resolved_movie(), candidate=SABDHAM_CANDIDATE, radarr_movie_id=42)
+            run_download_and_import(cfg, resolved=_resolved_movie(), candidate=SABDHAM_CANDIDATE, radarr_movie_id=42)
 
-    def test_retries_download_once_with_fresh_session_on_failure(self, monkeypatch):
-        fake_radarr = self._fake_radarr(monkeypatch)
+    def test_retries_download_once_with_fresh_session_on_failure(self, monkeypatch, tmp_path):
+        cfg = self._cfg(tmp_path)
+        fake_radarr = self._fake_radarr(monkeypatch, cfg)
         fresh_resolved = _resolved_movie()
         monkeypatch.setattr(importer, "resolve_movie", MagicMock(return_value=fresh_resolved))
 
         call_count = {"n": 0}
 
-        def flaky_download(*args, **kwargs):
+        def flaky_download(video_url, dest_path, on_progress=None):
             call_count["n"] += 1
             if call_count["n"] == 1:
                 raise RuntimeError("403 Forbidden")
-            return Path("/data/media/manual_imports/Sabdham (2025).mp4")
+            Path(dest_path).write_bytes(b"fake video content")
+            return Path(dest_path)
 
         self._fake_einthusan_new(monkeypatch, download_side_effect=flaky_download)
 
-        dest = run_download_and_import(CFG, resolved=_resolved_movie(), candidate=SABDHAM_CANDIDATE, radarr_movie_id=42)
+        dest = run_download_and_import(cfg, resolved=_resolved_movie(), candidate=SABDHAM_CANDIDATE, radarr_movie_id=42)
 
         assert call_count["n"] == 2
         assert dest.name == "Sabdham (2025).mp4"
+        assert dest.exists()
 
-    def test_raises_download_error_when_retry_also_fails(self, monkeypatch):
-        self._fake_radarr(monkeypatch)
+    def test_raises_download_error_when_retry_also_fails(self, monkeypatch, tmp_path):
+        cfg = self._cfg(tmp_path)
+        self._fake_radarr(monkeypatch, cfg)
         monkeypatch.setattr(importer, "resolve_movie", MagicMock(return_value=_resolved_movie()))
         self._fake_einthusan_new(monkeypatch, download_side_effect=RuntimeError("403 Forbidden"))
 
         with pytest.raises(DownloadError):
-            run_download_and_import(CFG, resolved=_resolved_movie(), candidate=SABDHAM_CANDIDATE, radarr_movie_id=42)
+            run_download_and_import(cfg, resolved=_resolved_movie(), candidate=SABDHAM_CANDIDATE, radarr_movie_id=42)
 
-    def test_propagates_download_cancelled_without_retry(self, monkeypatch):
-        self._fake_radarr(monkeypatch)
+    def test_propagates_download_cancelled_without_retry(self, monkeypatch, tmp_path):
+        cfg = self._cfg(tmp_path)
+        self._fake_radarr(monkeypatch, cfg)
         resolve_spy = MagicMock()
         monkeypatch.setattr(importer, "resolve_movie", resolve_spy)
         self._fake_einthusan_new(monkeypatch, download_side_effect=importer.DownloadCancelled("stopped"))
 
         with pytest.raises(importer.DownloadCancelled):
-            run_download_and_import(CFG, resolved=_resolved_movie(), candidate=SABDHAM_CANDIDATE, radarr_movie_id=42)
+            run_download_and_import(cfg, resolved=_resolved_movie(), candidate=SABDHAM_CANDIDATE, radarr_movie_id=42)
 
         resolve_spy.assert_not_called()
 
-    def test_falls_back_to_downloaded_movies_scan_when_approve_fails(self, monkeypatch):
-        fake_radarr = self._fake_radarr(monkeypatch)
+    def test_falls_back_to_downloaded_movies_scan_when_approve_fails(self, monkeypatch, tmp_path):
+        cfg = self._cfg(tmp_path)
+        fake_radarr = self._fake_radarr(monkeypatch, cfg)
         fake_radarr.manual_import_approve.side_effect = RuntimeError("Radarr 500")
         self._fake_einthusan_new(monkeypatch)
 
-        run_download_and_import(CFG, resolved=_resolved_movie(), candidate=SABDHAM_CANDIDATE, radarr_movie_id=42)
+        run_download_and_import(cfg, resolved=_resolved_movie(), candidate=SABDHAM_CANDIDATE, radarr_movie_id=42)
 
-        expected_path = str(Path(CFG["staging_host"]) / "Sabdham (2025).mp4")
+        expected_path = str(Path(cfg["staging_host"]) / "Sabdham (2025).mp4")
         fake_radarr.downloaded_movies_scan.assert_called_once_with(expected_path)
+
+    def test_raises_download_error_when_staging_dir_not_writable(self, monkeypatch, tmp_path):
+        # Point at a file (not a directory) so mkdir/write both fail —
+        # deterministic, no root-permission dependency across platforms.
+        blocked = tmp_path / "not_a_directory"
+        blocked.write_text("occupied")
+        cfg = {**CFG, "staging_host": str(blocked / "nested")}
+        self._fake_radarr(monkeypatch, cfg)
+        self._fake_einthusan_new(monkeypatch)
+
+        with pytest.raises(DownloadError, match="not writable"):
+            run_download_and_import(cfg, resolved=_resolved_movie(), candidate=SABDHAM_CANDIDATE, radarr_movie_id=42)
+
+
+class TestVerifyStagingDirWritable:
+    def test_creates_missing_directory_and_returns_resolved_path(self, tmp_path):
+        target = tmp_path / "nested" / "staging"
+        cfg = {"staging_host": str(target)}
+
+        result = importer._verify_staging_dir_writable(cfg, on_log=None)
+
+        assert result == target.resolve()
+        assert target.is_dir()
+
+    def test_leaves_no_probe_file_behind(self, tmp_path):
+        cfg = {"staging_host": str(tmp_path)}
+
+        importer._verify_staging_dir_writable(cfg, on_log=None)
+
+        assert list(tmp_path.iterdir()) == []
+
+    def test_calls_on_log_with_info_messages(self, tmp_path):
+        cfg = {"staging_host": str(tmp_path)}
+        logs = []
+
+        importer._verify_staging_dir_writable(cfg, on_log=lambda lvl, txt: logs.append((lvl, txt)))
+
+        assert all(lvl == "INFO" for lvl, _ in logs)
+        assert any("writable" in txt for _, txt in logs)
+
+    def test_raises_download_error_when_path_is_a_file_not_a_directory(self, tmp_path):
+        blocked = tmp_path / "occupied"
+        blocked.write_text("not a directory")
+        cfg = {"staging_host": str(blocked)}
+
+        with pytest.raises(DownloadError, match="not writable"):
+            importer._verify_staging_dir_writable(cfg, on_log=None)

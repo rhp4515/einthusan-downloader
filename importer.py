@@ -203,6 +203,40 @@ def remove_from_radarr(
 
 # ── Download + import ────────────────────────────────────────────────────
 
+_STAGING_PROBE_FILENAME = ".einthusan_write_check"
+
+
+def _verify_staging_dir_writable(cfg: dict, *, on_log: OnLog | None) -> Path:
+    """Fail fast, before any download traffic, if the staging directory
+    isn't writable from THIS process.
+
+    Downloads can take minutes; discovering a bad `STAGING_DIR_HOST` only
+    after the file lands and Radarr's manual-import scan comes back empty
+    wastes that whole download. This also logs the fully-resolved absolute
+    path actually in use, since a shell-exported STAGING_DIR_HOST silently
+    overrides whatever `.env` says (python-dotenv does not override
+    already-set environment variables).
+    """
+    staging = Path(cfg["staging_host"]).resolve()
+    _log(on_log, "INFO", f"Staging directory (resolved): {staging}")
+    try:
+        staging.mkdir(parents=True, exist_ok=True)
+        probe = staging / _STAGING_PROBE_FILENAME
+        probe.write_text("ok")
+        probe.unlink()
+    except OSError as exc:
+        raise DownloadError(
+            f"Staging directory '{staging}' is not writable from this process: {exc}. "
+            "Check STAGING_DIR_HOST (and any shell-exported STAGING_DIR_HOST, which "
+            "silently overrides .env). If Radarr runs on a different host or container "
+            "than this API process, STAGING_DIR_HOST must point at a filesystem "
+            "location BOTH processes actually share (e.g. an SMB/NFS mount at the "
+            "same absolute path on each side), not just a path valid on this side."
+        ) from exc
+    _log(on_log, "INFO", f"Staging directory verified writable: {staging}")
+    return staging
+
+
 def run_download_and_import(
     cfg: dict,
     *,
@@ -218,6 +252,8 @@ def run_download_and_import(
     Einthusan session once (the CDN-signed URL may have expired) and retries
     the download exactly once before giving up.
     """
+    staging = _verify_staging_dir_writable(cfg, on_log=on_log)
+
     radarr = RadarrClient(cfg["radarr"]["url"], cfg["radarr"]["api_key"])
 
     # Flip monitored=True now that the user has verified the match.
@@ -236,10 +272,15 @@ def run_download_and_import(
 
     ext = detect_extension(resolved.video_url)
     filename = safe_filename(candidate.title, candidate.year, ext)
-    dest_path = Path(cfg["staging_host"]) / filename
+    dest_path = staging / filename
 
     _log(on_log, "INFO", f"Downloading to: {dest_path}")
     _download_with_retry(cfg, resolved, dest_path, on_progress=on_progress, on_log=on_log)
+
+    if not dest_path.exists():
+        raise DownloadError(f"Download reported success but file is missing at {dest_path}")
+    size_mb = dest_path.stat().st_size / 1e6
+    _log(on_log, "INFO", f"Download complete: {dest_path} ({size_mb:.1f} MB)")
 
     _manual_import(cfg, radarr, radarr_movie_id, dest_path, on_log=on_log)
 
@@ -283,15 +324,35 @@ def _manual_import(cfg: dict, radarr: RadarrClient, radarr_movie_id: int, dest_p
     radarr_file_path = str(Path(cfg["staging_host"]) / dest_path.name)
     try:
         tamil_lang_id = radarr.get_language_id("Tamil")
-        _log(on_log, "INFO", "Asking Radarr to analyse the staging folder …")
+
+        local_exists = dest_path.exists()
+        local_size_mb = dest_path.stat().st_size / 1e6 if local_exists else 0.0
+        _log(
+            on_log, "INFO",
+            f"Asking Radarr to analyse the staging folder ({cfg['staging_host']}) — "
+            f"local file exists on this process: {local_exists} ({local_size_mb:.1f} MB)",
+        )
         import_items = radarr.manual_import_analyze(cfg["staging_host"], radarr_movie_id)
         matching = [i for i in import_items if Path(i["path"]).name == dest_path.name]
 
         if not matching:
             all_paths = [i.get("path", "") for i in import_items]
+            hint = (
+                "The file exists on this process's filesystem but Radarr's scan of "
+                f"'{cfg['staging_host']}' returned no files at all — Radarr likely runs on "
+                "a different host/container than this API process and does not have this "
+                "exact path mounted to the same physical location. STAGING_DIR_HOST must be "
+                "a path Radarr itself can read directly, not just this process."
+                if local_exists and not all_paths
+                else "Radarr saw files in the folder but none matched this filename — check "
+                "for a stale/partial file or a filename mismatch."
+                if local_exists
+                else "The file does not even exist on this process's filesystem — the download "
+                "likely wrote to a different path than STAGING_DIR_HOST resolves to here."
+            )
             raise ImportFailedError(
                 f"Radarr could not see '{dest_path.name}' in the staging folder. "
-                f"Files Radarr did see: {all_paths or 'none'}"
+                f"Files Radarr did see: {all_paths or 'none'}. {hint}"
             )
 
         radarr.manual_import_approve(

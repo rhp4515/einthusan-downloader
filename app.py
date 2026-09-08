@@ -36,7 +36,7 @@ def _init_state():
     st.session_state.setdefault("job_id", None)
     st.session_state.setdefault("step", "input")
     st.session_state.setdefault("error", "")
-    st.session_state.setdefault("api_base", os.environ.get("EINTHUSAN_API_BASE", "http://localhost:8000"))
+    st.session_state.setdefault("api_base", os.environ.get("EINTHUSAN_API_BASE", "http://localhost:8500"))
     st.session_state.setdefault("api_key", os.environ.get("EINTHUSAN_API_KEY", ""))
 
 

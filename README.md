@@ -60,15 +60,15 @@ STAGING_DIR_HOST=/data/media/manual_imports    # as seen by the API container
 
 # API service (api/)
 EINTHUSAN_API_KEY=choose-a-long-random-value
-API_PORT=8000
+API_PORT=8500
 
 # UI service (app.py) — only needed when running app.py against a remote API
-EINTHUSAN_API_BASE=http://localhost:8000
+EINTHUSAN_API_BASE=http://localhost:8500
 ```
 
 The Streamlit UI (`einthusan-ui` service) no longer needs Einthusan or Radarr
 credentials directly — it only needs `EINTHUSAN_API_BASE` (defaults to
-`http://einthusan-api:8000` inside Docker Compose) and `EINTHUSAN_API_KEY`.
+`http://einthusan-api:8500` inside Docker Compose) and `EINTHUSAN_API_KEY`.
 All actual credentials live only in the `einthusan-api` service's `.env`.
 
 ### Finding your Radarr quality profile ID
@@ -83,7 +83,7 @@ All actual credentials live only in the `einthusan-api` service's `.env`.
 
 ```
 host port 8502  →  einthusan-ui container port 8501 (Streamlit)
-host port 8503  →  einthusan-api container port 8000 (HTTP API)
+host port 8503  →  einthusan-api container port 8500 (HTTP API)
 ```
 
 The container needs to reach Radarr. Because it doesn't share a Docker network with the arr-stack, it uses `host.docker.internal` — a hostname that resolves to the host machine from inside any container. The `extra_hosts` line in `docker-compose.yaml` enables this on Linux:

@@ -61,7 +61,7 @@ COPY api ./api
 # run as a non-root UID (e.g. arr-user 1006:100 set in docker-compose).
 RUN chmod -R a+rX /app /pw-browsers
 
-EXPOSE 8501 8000
+EXPOSE 8501 8500
 
 # Health check — uses Python so no extra tools needed in the slim image
 HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \

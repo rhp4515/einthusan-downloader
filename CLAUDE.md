@@ -24,7 +24,7 @@ uv pip install -r requirements.txt --python .venv/bin/python3
 ```bash
 .venv/bin/honcho start   # runs both `api` and `ui` from Procfile
 # or individually:
-.venv/bin/python -m api               # API on :8000
+.venv/bin/python -m api               # API on :8500
 .venv/bin/streamlit run app.py        # UI on :8501, set EINTHUSAN_API_BASE to point at it
 ```
 
@@ -47,7 +47,7 @@ docker compose up --build -d
 
 - **`einthusan_dl.py`** — `EinthusanClient` (auth + scraping) and `RadarrClient` (Radarr v3 API wrapper), plus a `main()`/argparse CLI for headless use. Unchanged low-level behavior; see below for exact mechanisms.
 - **`importer.py`** — framework-free orchestration: `resolve_movie` (login + scrape + TMDB lookup via Radarr), `add_to_radarr` (add-or-reuse + tag, unmonitored by default), `run_download_and_import` (flip monitored, download with one retry via a freshly re-resolved session, manual import with `DownloadedMoviesScan` fallback). Every failure raises an `ImporterError` subclass carrying a stable `.code` string consumed by the API.
-- **`api/`** — FastAPI + uvicorn service (`python -m api`, port 8000 by default) that is the *only* thing holding Einthusan/Radarr credentials at runtime. Exposes a job-based workflow (`POST /api/v1/movies` → `awaiting_verification` → `PATCH` to correct the TMDB match → `POST /api/v1/jobs/{id}/download` → poll `GET /api/v1/jobs/{id}`) backed by an in-memory `JobStore` and two `ThreadPoolExecutor`s (`resolve_pool`, 2 workers; `download_pool`, 1 worker — serial downloads). Auth is a static `X-Api-Key` header (`EINTHUSAN_API_KEY`). See `docs/superpowers/specs/2026-09-07-einthusan-http-api-design.md` for the full endpoint/error-code reference.
+- **`api/`** — FastAPI + uvicorn service (`python -m api`, port 8500 by default) that is the *only* thing holding Einthusan/Radarr credentials at runtime. Exposes a job-based workflow (`POST /api/v1/movies` → `awaiting_verification` → `PATCH` to correct the TMDB match → `POST /api/v1/jobs/{id}/download` → poll `GET /api/v1/jobs/{id}`) backed by an in-memory `JobStore` and two `ThreadPoolExecutor`s (`resolve_pool`, 2 workers; `download_pool`, 1 worker — serial downloads). Auth is a static `X-Api-Key` header (`EINTHUSAN_API_KEY`). See `docs/superpowers/specs/2026-09-07-einthusan-http-api-design.md` for the full endpoint/error-code reference.
 - **`app.py`** — Streamlit UI, now a thin client of the API via `api_client.py::EinthusanApiClient`. Holds no Einthusan/Radarr credentials — only `EINTHUSAN_API_BASE` + `EINTHUSAN_API_KEY`. State machine: `input → resolving → preview → running → done | error`, driven by polling `GET /api/v1/jobs/{id}` every ~1.5s instead of the old daemon-thread + `queue.Queue` bridge.
 
 ### `einthusan_dl.py` — `EinthusanClient` and `RadarrClient` details
@@ -77,8 +77,8 @@ docker compose up --build -d
 |---|---|
 | `EINTHUSAN_COOKIES` | `sid=<value>` from browser DevTools — preferred over username/password |
 | `EINTHUSAN_API_KEY` | Static API key for authentication (the `X-Api-Key` header) |
-| `API_PORT` | Port for the HTTP API service (default: `8000`) |
-| `EINTHUSAN_API_BASE` | URL of the API service (used by `app.py`; defaults to `http://localhost:8000` locally, `http://einthusan-api:8000` in Docker) |
+| `API_PORT` | Port for the HTTP API service (default: `8500`) |
+| `EINTHUSAN_API_BASE` | URL of the API service (used by `app.py`; defaults to `http://localhost:8500` locally, `http://einthusan-api:8500` in Docker) |
 | `STAGING_DIR_HOST` | Staging folder path (same mount point used by both containers) |
 | `RADARR_ROOT_FOLDER` | Movies root path inside Radarr's container |
 | `RADARR_QUALITY_PROFILE_ID` | Radarr quality profile ID (default: `1`) |
